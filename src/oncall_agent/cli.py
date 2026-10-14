@@ -1,0 +1,192 @@
+"""Command-line entry point.
+
+Phase 1 ships four commands: ``version`` and ``config`` for sanity
+checks, ``demo`` to run a full canned investigation end to end with the
+scripted policy and fake tools, and ``audit`` to inspect the trail that
+investigation left behind.
+"""
+
+from __future__ import annotations
+
+import click
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+from . import __version__
+from .audit import AuditTrail
+from .config import Settings
+from .investigation import run_investigation
+from .llm import get_provider
+from .models import Alert, Severity
+from .tools import FakePodStatusTool, FakeRecentDeploysTool, ToolRegistry
+
+console = Console()
+
+SCENARIOS = {
+    "deploy-regression": dict(
+        title="High error rate on checkout-service",
+        description="5xx rate on checkout-service exceeded 5% for 5 minutes.",
+        service="checkout-service",
+        severity=Severity.HIGH,
+        deploy_minutes_ago=12,
+        version="v2.4.1",
+        previous_version="v2.4.0",
+        pod_restarts=5,
+        oom_killed=False,
+    ),
+    "oom": dict(
+        title="checkout-service pods crash-looping",
+        description="checkout-service pods are restarting repeatedly.",
+        service="checkout-service",
+        severity=Severity.CRITICAL,
+        deploy_minutes_ago=180,
+        version="v2.4.0",
+        previous_version="v2.3.9",
+        pod_restarts=20,
+        oom_killed=True,
+    ),
+    "unknown": dict(
+        title="Elevated latency on checkout-service",
+        description="p99 latency on checkout-service is 3x baseline.",
+        service="checkout-service",
+        severity=Severity.MEDIUM,
+        deploy_minutes_ago=180,
+        version="v2.4.0",
+        previous_version="v2.3.9",
+        pod_restarts=0,
+        oom_killed=False,
+    ),
+}
+
+
+@click.group()
+def main() -> None:
+    """oncall-agent: an agentic SRE incident responder."""
+
+
+@main.command()
+def version() -> None:
+    """Print the installed version."""
+    console.print(f"oncall-agent {__version__}")
+
+
+@main.command(name="config")
+def config_cmd() -> None:
+    """Show resolved configuration."""
+    settings = Settings.from_env()
+    table = Table(title="oncall-agent configuration")
+    table.add_column("setting")
+    table.add_column("value")
+    table.add_row("llm_provider", settings.llm_provider)
+    table.add_row("audit_log_path", str(settings.audit_log_path))
+    console.print(table)
+
+
+@main.command()
+@click.option(
+    "--scenario",
+    type=click.Choice(sorted(SCENARIOS)),
+    default="deploy-regression",
+    show_default=True,
+    help="Which canned incident scenario to investigate.",
+)
+@click.option(
+    "--audit-log",
+    "audit_log_path",
+    default=None,
+    help="Where to append the audit trail. Defaults to the configured path.",
+)
+def demo(scenario: str, audit_log_path: str | None) -> None:
+    """Run a full canned investigation with the scripted policy provider."""
+    settings = Settings.from_env()
+    log_path = audit_log_path or str(settings.audit_log_path)
+
+    params = SCENARIOS[scenario]
+    alert = Alert(
+        title=params["title"],
+        description=params["description"],
+        service=params["service"],
+        severity=params["severity"],
+    )
+
+    tools = ToolRegistry()
+    tools.register(
+        FakeRecentDeploysTool(
+            minutes_since_last_deploy=params["deploy_minutes_ago"],
+            version=params["version"],
+            previous_version=params["previous_version"],
+        )
+    )
+    tools.register(
+        FakePodStatusTool(restarts=params["pod_restarts"], oom_killed=params["oom_killed"])
+    )
+
+    provider = get_provider(settings.llm_provider)
+    audit = AuditTrail(log_path)
+
+    console.print(
+        Panel(
+            f"[bold]{alert.title}[/bold]\n{alert.description}\n"
+            f"service={alert.service} severity={alert.severity.value}",
+            title=f"Alert {alert.id}",
+        )
+    )
+
+    diagnosis = run_investigation(alert, provider, tools, audit)
+
+    console.print(
+        Panel(
+            f"[bold]Root cause:[/bold] {diagnosis.root_cause}\n"
+            f"[bold]Confidence:[/bold] {diagnosis.confidence:.2f}\n"
+            f"[bold]Proposed fix:[/bold] {diagnosis.proposed_fix}\n"
+            f"[bold]Requires approval:[/bold] {diagnosis.requires_approval}\n\n"
+            f"[bold]Evidence:[/bold]\n" + "\n".join(f"  - {e}" for e in diagnosis.evidence),
+            title="Diagnosis",
+            border_style="green",
+        )
+    )
+    console.print(f"[dim]Audit trail written to {log_path}[/dim]")
+
+
+@main.command(name="audit")
+@click.option(
+    "--audit-log",
+    "audit_log_path",
+    default=None,
+    help="Audit log to read. Defaults to the configured path.",
+)
+@click.option("--incident", "incident_id", default=None, help="Filter to a single incident id.")
+def audit_cmd(audit_log_path: str | None, incident_id: str | None) -> None:
+    """Show the audit trail of one or more investigations."""
+    settings = Settings.from_env()
+    log_path = audit_log_path or str(settings.audit_log_path)
+    trail = AuditTrail(log_path)
+    events = trail.for_incident(incident_id) if incident_id else trail.read_all()
+
+    if not events:
+        console.print(f"[yellow]No audit events found at {log_path}[/yellow]")
+        return
+
+    table = Table(title=f"Audit trail ({log_path})")
+    table.add_column("timestamp")
+    table.add_column("incident")
+    table.add_column("event")
+    table.add_column("summary")
+    for event in events:
+        table.add_row(
+            event.timestamp.isoformat(timespec="seconds"),
+            event.incident_id,
+            event.event_type.value,
+            _summarize(event.payload),
+        )
+    console.print(table)
+
+
+def _summarize(payload: dict) -> str:
+    text = str(payload)
+    return text if len(text) <= 80 else text[:77] + "..."
+
+
+if __name__ == "__main__":
+    main()
