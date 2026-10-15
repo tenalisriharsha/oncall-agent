@@ -20,6 +20,10 @@ from .investigation import run_investigation
 from .llm import get_provider
 from .models import Alert, Severity
 from .tools import FakePodStatusTool, FakeRecentDeploysTool, ToolRegistry
+from .tools.deploys import DeployHistoryStore, DeployHistoryTool, DeployRecord
+from .tools.kubectl import KubectlClient, KubectlError, KubectlLogsTool, KubectlPodStatusTool
+from .tools.prometheus import PrometheusClient, PrometheusQueryError, PrometheusQueryTool
+from .tools.runbooks import RunbookSearchTool
 
 console = Console()
 
@@ -186,6 +190,110 @@ def audit_cmd(audit_log_path: str | None, incident_id: str | None) -> None:
 def _summarize(payload: dict) -> str:
     text = str(payload)
     return text if len(text) <= 80 else text[:77] + "..."
+
+
+@main.group()
+def tools() -> None:
+    """Call a single real read-only tool directly, outside of an investigation."""
+
+
+@tools.command("query-prometheus")
+@click.argument("query")
+@click.option(
+    "--url",
+    "prometheus_url",
+    default=None,
+    help="Prometheus base URL. Defaults to the configured URL.",
+)
+def tools_query_prometheus(query: str, prometheus_url: str | None) -> None:
+    """Run a read-only PromQL instant query."""
+    settings = Settings.from_env()
+    client = PrometheusClient(prometheus_url or settings.prometheus_url)
+    tool = PrometheusQueryTool(client)
+    try:
+        result = tool.run(query=query)
+    except PrometheusQueryError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise SystemExit(1)
+    console.print_json(data=result)
+
+
+@tools.command("pod-status")
+@click.argument("service")
+@click.option("--namespace", default=None, help="Defaults to the configured namespace.")
+def tools_pod_status(service: str, namespace: str | None) -> None:
+    """Summarize pod restarts and OOM state for a service via kubectl."""
+    settings = Settings.from_env()
+    client = KubectlClient(
+        namespace=namespace or settings.kubectl_namespace,
+        context=settings.kubectl_context,
+    )
+    tool = KubectlPodStatusTool(client)
+    try:
+        result = tool.run(service=service)
+    except KubectlError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise SystemExit(1)
+    console.print_json(data=result)
+
+
+@tools.command("logs")
+@click.argument("pod_name")
+@click.option("--tail", "tail_lines", default=200, show_default=True, help="Number of log lines to fetch.")
+@click.option("--previous", is_flag=True, help="Fetch logs from the previous container instance.")
+def tools_logs(pod_name: str, tail_lines: int, previous: bool) -> None:
+    """Fetch recent logs for a pod via kubectl."""
+    settings = Settings.from_env()
+    client = KubectlClient(namespace=settings.kubectl_namespace, context=settings.kubectl_context)
+    tool = KubectlLogsTool(client)
+    try:
+        result = tool.run(pod_name=pod_name, tail_lines=tail_lines, previous=previous)
+    except KubectlError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise SystemExit(1)
+    console.print(Panel(result["logs"] or "(no output)", title=f"logs: {pod_name}"))
+
+
+@tools.command("record-deploy")
+@click.argument("service")
+@click.argument("version")
+@click.option("--previous-version", "previous_version", required=True, help="Version being replaced.")
+def tools_record_deploy(service: str, version: str, previous_version: str) -> None:
+    """Append a deploy to the local deploy ledger (stands in for a CD webhook)."""
+    settings = Settings.from_env()
+    store = DeployHistoryStore(settings.deploy_history_path)
+    record = store.append(DeployRecord(service=service, version=version, previous_version=previous_version))
+    console.print(
+        f"[green]Recorded deploy:[/green] {service} {previous_version} -> {version} "
+        f"at {record.deployed_at.isoformat(timespec='seconds')}"
+    )
+
+
+@tools.command("deploy-history")
+@click.argument("service")
+def tools_deploy_history(service: str) -> None:
+    """Show the most recent deploy to a service from the deploy ledger."""
+    settings = Settings.from_env()
+    store = DeployHistoryStore(settings.deploy_history_path)
+    tool = DeployHistoryTool(store)
+    console.print_json(data=tool.run(service=service))
+
+
+@tools.command("search-runbooks")
+@click.argument("query")
+@click.option("--top-k", default=3, show_default=True, help="Maximum number of runbooks to return.")
+def tools_search_runbooks(query: str, top_k: int) -> None:
+    """Keyword-search the local runbook corpus."""
+    settings = Settings.from_env()
+    tool = RunbookSearchTool(settings.runbook_dir, top_k=top_k)
+    result = tool.run(query=query)
+    if not result["matches"]:
+        console.print(f"[yellow]No runbook matches for '{query}'.[/yellow]")
+        return
+    for match in result["matches"]:
+        console.print(
+            Panel(match["excerpt"], title=f"{match['runbook']} (score={match['score']})")
+        )
 
 
 if __name__ == "__main__":

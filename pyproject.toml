@@ -14,6 +14,7 @@ dependencies = [
     "click>=8.1",
     "rich>=13.7",
     "pydantic>=2.6",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
@@ -31,3 +32,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "integration: needs a live Prometheus/cluster; skipped unless ONCALL_AGENT_RUN_INTEGRATION=1",
+]

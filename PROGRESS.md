@@ -33,17 +33,26 @@ src/oncall_agent/
 │   └── factory.py       get_provider(name) — swap providers from config
 ├── tools/
 │   ├── base.py           Tool / ToolRegistry contract
-│   └── fakes.py          FakeRecentDeploysTool, FakePodStatusTool (demo doubles)
-└── cli.py               click CLI: version, config, demo, audit
+│   ├── fakes.py          FakeRecentDeploysTool, FakePodStatusTool (demo doubles)
+│   ├── prometheus.py     PrometheusClient / PrometheusQueryTool — read-only PromQL
+│   ├── kubectl.py        KubectlClient — get/describe/logs only, refuses anything else
+│   ├── deploys.py        DeployHistoryStore/Tool — append-only deploy ledger
+│   └── runbooks.py       RunbookSearchTool — keyword search over runbooks/*.md
+└── cli.py               click CLI: version, config, demo, audit, tools
 ```
 
 The investigation loop is provider- and tool-agnostic: it asks whatever
 `LLMProvider` is configured what to do next given the evidence gathered
 so far, executes that decision against whatever `Tool`s are registered,
-and logs every step to the `AuditTrail` before moving on. Phase 1 wires
+and logs every step to the `AuditTrail` before moving on. Phase 1 wired
 this up end to end with a deterministic rule-based provider and two fake
-tools; later phases swap in real tool integrations and richer reasoning
-without changing this shape.
+tools; Phase 2 added real tool implementations behind the same `Tool`
+interface, so the loop's shape never changed. The `demo` CLI command
+still uses the fakes (deterministic, needed for reproducible scenarios
+and screenshots); the real clients are reachable directly via
+`oncall-agent tools <name>` and are built to be registered into the
+same `ToolRegistry` the loop reads from once Phase 3's richer
+reasoning needs live evidence instead of canned evidence.
 
 ## Phased build plan
 
@@ -58,12 +67,16 @@ without changing this shape.
   - CLI: `version`, `config`, `demo` (3 canned scenarios), `audit`
   - Full test suite (44 tests, 99% statement coverage)
 
-- [ ] **Phase 2 — Real read-only tool integrations**
-  - Prometheus query client
-  - `kubectl get/describe/logs` client (read-only)
-  - Runbook RAG search over a local markdown runbook corpus
-  - Deploy/CD history source
-  - All implementing the Phase 1 `Tool` interface, swappable with the fakes
+- [x] **Phase 2 — Real read-only tool integrations** (Night 2)
+  - Prometheus query client (`PrometheusClient`/`PrometheusQueryTool`) over the standard `/api/v1/query` HTTP API
+  - `kubectl get/describe/logs` client (`KubectlClient`) — a single chokepoint refuses any subcommand outside `get`/`describe`/`logs`, so nothing here can mutate a cluster
+  - Runbook keyword search (`RunbookSearchTool`) over a 6-runbook markdown corpus in `runbooks/` (one per Phase 5 scenario), dependency-free and deterministic
+  - Deploy/CD history source (`DeployHistoryStore`/`DeployHistoryTool`) — an append-only JSON-lines ledger, same shape as the audit trail, standing in for a CD webhook history
+  - All four implement the Phase 1 `Tool` interface and are drop-in swappable with the fakes
+  - New `Settings` fields (`prometheus_url`, `kubectl_namespace`, `kubectl_context`, `runbook_dir`, `deploy_history_path`), all env-driven
+  - New CLI group `oncall-agent tools` (`query-prometheus`, `pod-status`, `logs`, `search-runbooks`, `record-deploy`, `deploy-history`) to call any real tool directly
+  - Unit tests mock the HTTP/subprocess boundary (`requests.get`, `subprocess.run`) so the suite needs no live Prometheus or cluster; `KubectlClient`'s runner is resolved at construction time (not bound as a import-time default) specifically so tests can monkeypatch `subprocess.run` safely
+  - Full test suite (91 tests, 99% statement coverage)
 
 - [ ] **Phase 3 — Smarter reasoning**
   - Multi-hypothesis ranking & comparison
@@ -90,12 +103,29 @@ without changing this shape.
 
 ## Where to resume
 
-**Next session: start Phase 2.** Build the real Prometheus and `kubectl`
-read-only clients against the existing `Tool` interface in
-`src/oncall_agent/tools/base.py` — see `tools/fakes.py` for the shape
-those clients need to match. The runbook RAG search and deploy-history
-source can follow in the same phase. Keep the fakes around for tests;
-real clients should be exercised separately (e.g. integration tests
-behind a marker, since they need a live cluster/Prometheus).
+**Next session: start Phase 3 — smarter reasoning.** The scripted
+policy's decision tree is currently fixed (deploy check -> pod check ->
+diagnose); Phase 3 should let it rank and compare multiple hypotheses,
+re-plan when a tool result contradicts the leading hypothesis, and
+export a structured diagnosis report (markdown/JSON). An optional
+local-model provider (e.g. Ollama) can be added alongside
+`ScriptedPolicyProvider` in `llm/factory.py` in the same phase, but the
+scripted policy should remain the default so tests and CI stay
+network-free.
+
+The real Phase 2 tools (`tools/prometheus.py`, `tools/kubectl.py`,
+`tools/runbooks.py`, `tools/deploys.py`) are currently only reachable
+standalone via `oncall-agent tools <name>` — they are not yet wired
+into `run_investigation`/the `demo` command, since `demo` still needs
+deterministic, canned evidence for reproducible scenarios and
+screenshots. Wiring a "live" investigation mode that registers the
+real tools into a `ToolRegistry` instead of the fakes is reasonable
+scope for Phase 3 or 4, once there's a reasoning layer sophisticated
+enough to act on evidence that isn't scripted.
+
+No integration tests against a live Prometheus/cluster exist yet
+(the `integration` pytest marker is registered in `pyproject.toml` but
+unused) — add them if/when a live cluster or Prometheus becomes
+available to test against; they should stay skipped by default.
 
 STATUS: IN_PROGRESS

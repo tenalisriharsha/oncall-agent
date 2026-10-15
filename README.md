@@ -13,11 +13,13 @@ This project is being built in public, one night at a time. See
 [`PROGRESS.md`](PROGRESS.md) for the full architecture, the phased build
 plan, and exactly where work left off.
 
-**Current phase:** Phase 1 (scaffold + core foundation) is complete —
-domain models, an append-only audit trail, a pluggable LLM provider
-interface with a deterministic scripted policy, a read-only tool
-interface with demo tools, the investigate → hypothesize → diagnose
-loop, and a CLI, all backed by a full test suite.
+**Current phase:** Phase 1 (scaffold + core foundation) and Phase 2
+(real read-only tool integrations) are complete — domain models, an
+append-only audit trail, a pluggable LLM provider interface with a
+deterministic scripted policy, the investigate → hypothesize →
+diagnose loop, real Prometheus/kubectl/runbook/deploy-history clients
+alongside the original fakes, and a CLI, all backed by a full test
+suite.
 
 ## Preview
 
@@ -81,13 +83,24 @@ src/oncall_agent/
 │   └── factory.py       get_provider(name) — swap providers from config
 ├── tools/
 │   ├── base.py           Tool / ToolRegistry contract
-│   └── fakes.py          FakeRecentDeploysTool, FakePodStatusTool (demo doubles)
-└── cli.py               click CLI: version, config, demo, audit
+│   ├── fakes.py          FakeRecentDeploysTool, FakePodStatusTool (demo doubles)
+│   ├── prometheus.py     PrometheusClient / PrometheusQueryTool — read-only PromQL
+│   ├── kubectl.py        KubectlClient — get/describe/logs only, never a write
+│   ├── deploys.py        DeployHistoryStore/Tool — append-only deploy ledger
+│   └── runbooks.py       RunbookSearchTool — keyword search over runbooks/*.md
+└── cli.py               click CLI: version, config, demo, audit, tools
 ```
 
-Full phase-by-phase plan (read-only tool integrations, richer
-reasoning, the Slack approval gate, the chaos-kit simulator, the
-scorecard) is in [`PROGRESS.md`](PROGRESS.md).
+`tools/` ships two implementations of the same `Tool` interface: the
+Phase 1 fakes (deterministic, used by `demo` and most tests) and the
+Phase 2 real clients (`prometheus.py`, `kubectl.py`, `deploys.py`,
+`runbooks.py`), reachable directly via `oncall-agent tools <name>`.
+Both sides of that interface are interchangeable — nothing above the
+`Tool` contract needs to know or care which one it's holding.
+
+Full phase-by-phase plan (richer reasoning, the Slack approval gate,
+the chaos-kit simulator, the scorecard) is in
+[`PROGRESS.md`](PROGRESS.md).
 
 ## Installation
 
@@ -116,6 +129,14 @@ oncall-agent demo --scenario unknown
 
 # inspect the audit trail an investigation left behind
 oncall-agent audit
+
+# call a real read-only tool directly, outside an investigation
+oncall-agent tools query-prometheus 'up{job="checkout-service"}' --url http://localhost:9090
+oncall-agent tools pod-status checkout-service --namespace prod
+oncall-agent tools logs checkout-service-abc123 --tail 100
+oncall-agent tools search-runbooks "pods crash looping oom killed"
+oncall-agent tools record-deploy checkout-service v2.5.0 --previous-version v2.4.1
+oncall-agent tools deploy-history checkout-service
 ```
 
 Each `demo` run drives the real investigation loop — the scripted
@@ -123,14 +144,27 @@ policy decides what to check, the fake tools return canned evidence,
 and every step is appended to the audit log — so `oncall-agent audit`
 afterwards shows exactly how the agent got to its conclusion.
 
+The `tools` group calls the same Phase 2 clients the investigation
+loop would, directly: `query-prometheus` runs a PromQL instant query
+against a real Prometheus; `pod-status` and `logs` shell out to a
+read-only `kubectl` (only `get`/`describe`/`logs` are ever allowed —
+anything else is refused before it runs); `search-runbooks`
+keyword-searches the markdown corpus under `runbooks/`; and
+`record-deploy`/`deploy-history` write to and read from a local
+append-only deploy ledger that stands in for a CD system's webhook
+history. None of these need a live cluster or Prometheus to build or
+test against — every unit test mocks the HTTP/subprocess boundary.
+
 ## Testing
 
 ```bash
 pytest -q --cov=oncall_agent
 ```
 
-44 tests, 99% statement coverage, no network access or API key
-required — this is also what CI runs.
+91 tests, 99% statement coverage, no network access or API key
+required — this is also what CI runs. The real Prometheus/kubectl
+clients are tested by mocking the HTTP/subprocess boundary, so the
+suite never needs a live cluster or metrics backend.
 
 ## License
 
