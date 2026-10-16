@@ -46,6 +46,37 @@ def test_diagnosis_requires_approval_by_default():
     assert diagnosis.requires_approval is True
 
 
+def test_hypothesis_category_defaults_to_none():
+    hypothesis = Hypothesis(statement="ok", confidence=0.5)
+    assert hypothesis.category is None
+
+
+def test_hypothesis_category_can_be_set():
+    hypothesis = Hypothesis(statement="ok", confidence=0.5, category="deploy_regression")
+    assert hypothesis.category == "deploy_regression"
+
+
+def test_diagnosis_hypotheses_considered_defaults_to_empty_list():
+    diagnosis = Diagnosis(root_cause="bad deploy", confidence=0.9, proposed_fix="roll back")
+    assert diagnosis.hypotheses_considered == []
+
+
+def test_diagnosis_hypotheses_considered_round_trips():
+    hypothesis = Hypothesis(statement="h", confidence=0.6, category="dependency_failure")
+    diagnosis = Diagnosis(
+        root_cause="bad deploy",
+        confidence=0.9,
+        proposed_fix="roll back",
+        hypotheses_considered=[hypothesis],
+    )
+    restored = Diagnosis.model_validate_json(diagnosis.model_dump_json())
+    assert restored.hypotheses_considered == [hypothesis]
+
+
+def test_event_type_includes_hypothesis_revised():
+    assert EventType.HYPOTHESIS_REVISED.value == "hypothesis_revised"
+
+
 def test_tool_call_record_defaults():
     record = ToolCallRecord(tool="get_recent_deploys", arguments={"service": "checkout"})
     assert record.result is None

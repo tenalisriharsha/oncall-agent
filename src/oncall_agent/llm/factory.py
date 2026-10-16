@@ -7,11 +7,15 @@ rest of the codebase caring which implementation it got.
 
 from __future__ import annotations
 
+from typing import Any
+
 from .base import LLMProvider
+from .ollama import OllamaProvider
 from .scripted import ScriptedPolicyProvider
 
 _PROVIDERS: dict[str, type[LLMProvider]] = {
     "scripted": ScriptedPolicyProvider,
+    "ollama": OllamaProvider,
 }
 
 _PLANNED_PROVIDERS = {
@@ -19,11 +23,14 @@ _PLANNED_PROVIDERS = {
 }
 
 
-def get_provider(name: str) -> LLMProvider:
+def get_provider(name: str, **kwargs: Any) -> LLMProvider:
     """Instantiate the named provider.
 
-    Raises ``NotImplementedError`` for providers that are on the roadmap
-    but not built yet, and ``ValueError`` for anything unrecognized.
+    Extra ``kwargs`` are forwarded to the provider's constructor (e.g.
+    ``base_url``/``model`` for ``"ollama"``); the scripted policy takes
+    none. Raises ``NotImplementedError`` for providers that are on the
+    roadmap but not built yet, and ``ValueError`` for anything
+    unrecognized.
     """
     if name in _PLANNED_PROVIDERS:
         raise NotImplementedError(_PLANNED_PROVIDERS[name])
@@ -32,7 +39,7 @@ def get_provider(name: str) -> LLMProvider:
     except KeyError as exc:
         known = ", ".join(sorted(_PROVIDERS))
         raise ValueError(f"Unknown LLM provider '{name}'. Known providers: {known}") from exc
-    return provider_cls()
+    return provider_cls(**kwargs)
 
 
 def available_providers() -> list[str]:

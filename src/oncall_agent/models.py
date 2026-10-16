@@ -54,11 +54,19 @@ class ToolCallRecord(BaseModel):
 
 
 class Hypothesis(BaseModel):
-    """A candidate explanation for the alert, with supporting evidence."""
+    """A candidate explanation for the alert, with supporting evidence.
+
+    ``category`` is an optional machine-readable tag (e.g.
+    ``"deploy_regression"``) a reasoning policy can attach so later steps
+    can recognize and compare hypotheses without re-parsing ``statement``
+    text. It is ``None`` for hypotheses that don't come from a policy that
+    tags them.
+    """
 
     statement: str
     confidence: float = Field(ge=0.0, le=1.0)
     evidence: list[str] = Field(default_factory=list)
+    category: str | None = None
 
 
 class Diagnosis(BaseModel):
@@ -69,6 +77,7 @@ class Diagnosis(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     proposed_fix: str
     requires_approval: bool = True
+    hypotheses_considered: list[Hypothesis] = Field(default_factory=list)
 
 
 class EventType(str, Enum):
@@ -76,6 +85,7 @@ class EventType(str, Enum):
 
     ALERT_RECEIVED = "alert_received"
     HYPOTHESIS_FORMED = "hypothesis_formed"
+    HYPOTHESIS_REVISED = "hypothesis_revised"
     TOOL_CALL = "tool_call"
     DIAGNOSIS_REACHED = "diagnosis_reached"
     APPROVAL_REQUESTED = "approval_requested"
