@@ -27,10 +27,13 @@ src/oncall_agent/
 ├── audit.py            AuditTrail — append-only JSON-lines audit log
 ├── config.py            Settings — env-driven configuration (ONCALL_AGENT_*)
 ├── investigation.py    the investigate -> hypothesize -> diagnose loop
+├── reasoning.py         rank_hypotheses / current_hypothesis — multi-hypothesis comparison
+├── report.py             export_report — Markdown/JSON diagnosis report export
 ├── llm/
 │   ├── base.py          LLMProvider / LLMRequest / LLMResponse contract
-│   ├── scripted.py      ScriptedPolicyProvider — deterministic default
-│   └── factory.py       get_provider(name) — swap providers from config
+│   ├── scripted.py      ScriptedPolicyProvider — deterministic default, re-plans on contradiction
+│   ├── ollama.py         OllamaProvider — optional local-model backend
+│   └── factory.py       get_provider(name, **kwargs) — swap providers from config
 ├── tools/
 │   ├── base.py           Tool / ToolRegistry contract
 │   ├── fakes.py          FakeRecentDeploysTool, FakePodStatusTool (demo doubles)
@@ -47,12 +50,16 @@ so far, executes that decision against whatever `Tool`s are registered,
 and logs every step to the `AuditTrail` before moving on. Phase 1 wired
 this up end to end with a deterministic rule-based provider and two fake
 tools; Phase 2 added real tool implementations behind the same `Tool`
-interface, so the loop's shape never changed. The `demo` CLI command
-still uses the fakes (deterministic, needed for reproducible scenarios
-and screenshots); the real clients are reachable directly via
+interface, so the loop's shape never changed. Phase 3 added a second
+`LLMProvider` (`OllamaProvider`) behind the same contract, plus a
+re-planning step inside the scripted policy itself — the loop's shape
+still never changed; a revision is just another `FORM_HYPOTHESIS`
+response with `is_revision=True`. The `demo` CLI command still uses the
+fakes (deterministic, needed for reproducible scenarios and
+screenshots); the real clients are reachable directly via
 `oncall-agent tools <name>` and are built to be registered into the
-same `ToolRegistry` the loop reads from once Phase 3's richer
-reasoning needs live evidence instead of canned evidence.
+same `ToolRegistry` the loop reads from once a "live" investigation
+mode (Phase 4+) needs live evidence instead of canned evidence.
 
 ## Phased build plan
 
@@ -78,11 +85,33 @@ reasoning needs live evidence instead of canned evidence.
   - Unit tests mock the HTTP/subprocess boundary (`requests.get`, `subprocess.run`) so the suite needs no live Prometheus or cluster; `KubectlClient`'s runner is resolved at construction time (not bound as a import-time default) specifically so tests can monkeypatch `subprocess.run` safely
   - Full test suite (91 tests, 99% statement coverage)
 
-- [ ] **Phase 3 — Smarter reasoning**
-  - Multi-hypothesis ranking & comparison
-  - Re-planning when new evidence contradicts a hypothesis
-  - Optional local-model provider (e.g. Ollama) alongside the scripted policy
-  - Structured diagnosis report export (markdown/JSON)
+- [x] **Phase 3 — Smarter reasoning** (Night 3)
+  - `reasoning.py`: `rank_hypotheses()` (confidence-ranked, for comparison/reporting) and
+    `current_hypothesis()` (most recent — the standing belief, which may have superseded
+    an earlier one)
+  - `Hypothesis.category` (optional tag: `deploy_regression`, `resource_exhaustion`,
+    `dependency_failure`) and `Diagnosis.hypotheses_considered` (ranked list attached to
+    every diagnosis) added to the domain models
+  - `ScriptedPolicyProvider` re-plans once: if pod health shows zero restarts and no OOM
+    signal — flatly contradicting a deploy-based hypothesis — it revises toward a
+    dependency-failure hypothesis instead of diagnosing on a hunch that evidence just
+    disproved. A new `EventType.HYPOTHESIS_REVISED` audit event (and
+    `LLMResponse.is_revision`) distinguishes a revision from a first guess in the trail.
+    Purely additive: every Phase 1/2 decision path and test is byte-for-byte unchanged
+    because the revision check only fires on hypotheses the scripted policy itself
+    tagged with a category
+  - `llm/ollama.py`: `OllamaProvider`, an optional local-model backend satisfying the
+    same `LLMProvider` contract — posts to a local Ollama server's `/api/generate` and
+    parses the model's JSON reply into an `LLMResponse`. Not the default; registered in
+    `llm/factory.py` as `"ollama"` (the scripted policy stays default so tests/CI stay
+    network-free). `get_provider()` now forwards `**kwargs` to the provider constructor
+    so `base_url`/`model` can be set
+  - New `Settings` fields `ollama_url`/`ollama_model` (env-driven, same pattern as the
+    rest); `oncall-agent config` now shows every resolved setting, not just two
+  - `report.py`: `export_report()` renders a completed investigation (alert + diagnosis
+    + ranked hypotheses) as standalone Markdown or JSON. Wired into the CLI via
+    `oncall-agent demo --report PATH [--report-format markdown|json]`
+  - Full test suite (136 tests, 99% statement coverage)
 
 - [ ] **Phase 4 — Human approval gate**
   - Every state-changing action (restart, rollback, scale) blocked pending approval
@@ -103,15 +132,25 @@ reasoning needs live evidence instead of canned evidence.
 
 ## Where to resume
 
-**Next session: start Phase 3 — smarter reasoning.** The scripted
-policy's decision tree is currently fixed (deploy check -> pod check ->
-diagnose); Phase 3 should let it rank and compare multiple hypotheses,
-re-plan when a tool result contradicts the leading hypothesis, and
-export a structured diagnosis report (markdown/JSON). An optional
-local-model provider (e.g. Ollama) can be added alongside
-`ScriptedPolicyProvider` in `llm/factory.py` in the same phase, but the
-scripted policy should remain the default so tests and CI stay
-network-free.
+**Next session: start Phase 4 — human approval gate.** Diagnoses
+already carry `requires_approval: bool` (always `True` today) but
+nothing currently blocks on it — the loop returns the `Diagnosis` and
+stops. Phase 4 should add an approval step after `DIAGNOSE` for any
+proposed fix that's actually state-changing: a CLI prompt first (ask
+y/n, log the decision), a Slack integration second, and then
+"action executors" that are only allowed to run once a human has said
+yes, with the approval decision itself written to the audit trail
+(`EventType.APPROVAL_REQUESTED`/`APPROVAL_DECIDED` already exist in
+`models.py`, unused since Phase 1 — this is what they're for).
+
+The scripted policy's re-planning (Phase 3) only revises once, and only
+when pod health shows *zero* signal at all (no restarts, no OOM) — a
+deliberately narrow trigger chosen so every Phase 1/2 test fixture
+(which builds `Hypothesis` objects without a `category`) stays
+untouched. If Phase 4 or later adds more tool types, the same pattern
+— tag hypotheses with `category`, check `current_hypothesis(...)` before
+acting on one — is the way to add more contradiction checks without
+risking the existing ones.
 
 The real Phase 2 tools (`tools/prometheus.py`, `tools/kubectl.py`,
 `tools/runbooks.py`, `tools/deploys.py`) are currently only reachable
@@ -120,8 +159,16 @@ into `run_investigation`/the `demo` command, since `demo` still needs
 deterministic, canned evidence for reproducible scenarios and
 screenshots. Wiring a "live" investigation mode that registers the
 real tools into a `ToolRegistry` instead of the fakes is reasonable
-scope for Phase 3 or 4, once there's a reasoning layer sophisticated
-enough to act on evidence that isn't scripted.
+scope for Phase 4+, once an approval gate exists to stop that live mode
+from ever acting on a cluster unsupervised.
+
+`OllamaProvider` (Phase 3) is untested against a real Ollama server —
+only against a mocked HTTP boundary, same pattern as the Prometheus/
+kubectl clients. If a local Ollama install becomes available to
+develop against, worth a manual smoke test (`ONCALL_AGENT_LLM_PROVIDER=
+ollama oncall-agent demo`) to see how a real model's output quality
+compares to the scripted policy's canned decision tree — the prompt in
+`llm/ollama.py` has had no real-model tuning yet.
 
 No integration tests against a live Prometheus/cluster exist yet
 (the `integration` pytest marker is registered in `pyproject.toml` but
