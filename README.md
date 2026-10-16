@@ -13,24 +13,25 @@ This project is being built in public, one night at a time. See
 [`PROGRESS.md`](PROGRESS.md) for the full architecture, the phased build
 plan, and exactly where work left off.
 
-**Current phase:** Phase 1 (scaffold + core foundation) and Phase 2
-(real read-only tool integrations) are complete — domain models, an
+**Current phase:** Phases 1–3 are complete — domain models, an
 append-only audit trail, a pluggable LLM provider interface with a
 deterministic scripted policy, the investigate → hypothesize →
 diagnose loop, real Prometheus/kubectl/runbook/deploy-history clients
-alongside the original fakes, and a CLI, all backed by a full test
-suite.
+alongside the original fakes, multi-hypothesis ranking with
+contradiction-triggered re-planning, an optional local-model provider
+(Ollama), structured diagnosis report export (Markdown/JSON), and a
+CLI, all backed by a full test suite.
 
 ## Preview
 
 All screenshots below are real terminal output from the commands shown
 — nothing hand-typed or edited.
 
-**`oncall-agent --help`** — the four Phase 1 commands:
+**`oncall-agent --help`** — the five top-level commands:
 
 ![CLI help](docs/screenshots/01-cli-help.png)
 
-**`oncall-agent config`** — resolved settings, scripted provider by default:
+**`oncall-agent config`** — every resolved setting, including the Phase 3 Ollama provider URL/model:
 
 ![Resolved configuration](docs/screenshots/02-config.png)
 
@@ -42,17 +43,25 @@ All screenshots below are real terminal output from the commands shown
 
 ![OOM scenario](docs/screenshots/04-demo-oom.png)
 
-**`oncall-agent demo --scenario unknown`** — neither signal present, low-confidence diagnosis that escalates to a human:
+**`oncall-agent demo --scenario unknown`** — pod health contradicts the initial deploy-based guess, so the agent re-plans mid-investigation and the diagnosis lists every hypothesis it considered, ranked by confidence:
 
-![Unknown-cause scenario](docs/screenshots/05-demo-unknown.png)
+![Unknown-cause scenario with a mid-investigation re-plan](docs/screenshots/05-demo-unknown.png)
 
-**`oncall-agent audit`** — the full audit trail across all three runs above, step by step:
+**`oncall-agent audit`** — the full audit trail across all three runs above; note the `hypothesis_revised` event in the third incident where the agent changed its mind:
 
 ![Audit trail](docs/screenshots/06-audit-trail.png)
 
 **`oncall-agent demo --scenario bogus`** — invalid input is rejected before anything runs:
 
 ![Invalid scenario error](docs/screenshots/07-demo-invalid-scenario.png)
+
+**`oncall-agent demo --scenario unknown --report docs-demo-report.md`** — exporting a structured diagnosis report alongside the usual terminal output:
+
+![Demo run exporting a diagnosis report](docs/screenshots/08-demo-report-export.png)
+
+**`cat docs-demo-report.md`** — the exported Markdown report: alert context, diagnosis, evidence, and the ranked hypothesis comparison:
+
+![Exported Markdown diagnosis report](docs/screenshots/09-report-markdown-output.png)
 
 ## Why this exists
 
@@ -67,7 +76,16 @@ and waits for an explicit approval, logged alongside everything else.
 It also doesn't assume you have a paid LLM API key. The default
 provider is a deterministic, rule-based policy that needs no network
 access at all, which is what tests and CI run against. A real model —
-hosted or local — is a pluggable alternative, not a requirement.
+hosted (not yet built) or local via Ollama — is a pluggable
+alternative, not a requirement.
+
+Real investigations don't nail the diagnosis on the first guess either.
+The scripted policy forms an initial hypothesis from deploy history,
+but if the next tool result doesn't back it up at all, it revises
+instead of forcing a conclusion it just watched get contradicted — and
+the final diagnosis shows every hypothesis it held along the way,
+ranked by confidence, so a human reviewing it can see not just the
+answer but how the agent got there and what else it considered.
 
 ## Architecture
 
@@ -77,10 +95,13 @@ src/oncall_agent/
 ├── audit.py            AuditTrail — append-only JSON-lines audit log
 ├── config.py            Settings — env-driven configuration (ONCALL_AGENT_*)
 ├── investigation.py    the investigate -> hypothesize -> diagnose loop
+├── reasoning.py         rank_hypotheses / current_hypothesis — multi-hypothesis comparison
+├── report.py             export_report — Markdown/JSON diagnosis report export
 ├── llm/
 │   ├── base.py          LLMProvider / LLMRequest / LLMResponse contract
-│   ├── scripted.py      ScriptedPolicyProvider — deterministic default
-│   └── factory.py       get_provider(name) — swap providers from config
+│   ├── scripted.py      ScriptedPolicyProvider — deterministic default, re-plans on contradiction
+│   ├── ollama.py         OllamaProvider — optional local-model backend
+│   └── factory.py       get_provider(name, **kwargs) — swap providers from config
 ├── tools/
 │   ├── base.py           Tool / ToolRegistry contract
 │   ├── fakes.py          FakeRecentDeploysTool, FakePodStatusTool (demo doubles)
@@ -97,6 +118,13 @@ Phase 2 real clients (`prometheus.py`, `kubectl.py`, `deploys.py`,
 `runbooks.py`), reachable directly via `oncall-agent tools <name>`.
 Both sides of that interface are interchangeable — nothing above the
 `Tool` contract needs to know or care which one it's holding.
+
+`llm/` ships the same pattern one layer up: `ScriptedPolicyProvider`
+(the default, deterministic, network-free) and `OllamaProvider`
+(optional, talks to a local Ollama server and asks it to return its
+next decision as JSON) both satisfy the exact same `LLMProvider`
+contract, so `get_provider(name)` is the only place that knows which
+one it handed back.
 
 Full phase-by-phase plan (richer reasoning, the Slack approval gate,
 the chaos-kit simulator, the scorecard) is in
@@ -127,6 +155,10 @@ oncall-agent demo --scenario deploy-regression
 oncall-agent demo --scenario oom
 oncall-agent demo --scenario unknown
 
+# export the diagnosis as a structured report alongside the audit log
+oncall-agent demo --scenario unknown --report incident-report.md
+oncall-agent demo --scenario unknown --report incident-report.json --report-format json
+
 # inspect the audit trail an investigation left behind
 oncall-agent audit
 
@@ -155,16 +187,35 @@ append-only deploy ledger that stands in for a CD system's webhook
 history. None of these need a live cluster or Prometheus to build or
 test against — every unit test mocks the HTTP/subprocess boundary.
 
+The `demo` command still runs the scripted policy by default. To try
+the optional local-model provider instead, point it at a running
+[Ollama](https://ollama.com) server:
+
+```bash
+export ONCALL_AGENT_LLM_PROVIDER=ollama
+export ONCALL_AGENT_OLLAMA_URL=http://localhost:11434
+export ONCALL_AGENT_OLLAMA_MODEL=llama3.1
+oncall-agent demo --scenario deploy-regression
+```
+
+`OllamaProvider` asks the model to return its next decision as strict
+JSON matching the same `LLMResponse` shape the scripted policy
+produces, so it's a drop-in swap — nothing in `run_investigation` or
+the CLI needs to change. It needs network access to the Ollama server,
+which is exactly why it isn't the default: tests and CI stay on the
+scripted policy.
+
 ## Testing
 
 ```bash
 pytest -q --cov=oncall_agent
 ```
 
-91 tests, 99% statement coverage, no network access or API key
+136 tests, 99% statement coverage, no network access or API key
 required — this is also what CI runs. The real Prometheus/kubectl
-clients are tested by mocking the HTTP/subprocess boundary, so the
-suite never needs a live cluster or metrics backend.
+clients and the optional Ollama provider are all tested by mocking the
+HTTP/subprocess boundary, so the suite never needs a live cluster,
+metrics backend, or local model.
 
 ## License
 
