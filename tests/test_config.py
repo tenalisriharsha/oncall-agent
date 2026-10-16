@@ -4,6 +4,8 @@ from oncall_agent.config import (
     DEFAULT_AUDIT_LOG_PATH,
     DEFAULT_DEPLOY_HISTORY_PATH,
     DEFAULT_LLM_PROVIDER,
+    DEFAULT_OLLAMA_MODEL,
+    DEFAULT_OLLAMA_URL,
     DEFAULT_PROMETHEUS_URL,
     DEFAULT_RUNBOOK_DIR,
     Settings,
@@ -19,6 +21,8 @@ def test_defaults_when_env_is_empty():
     assert settings.deploy_history_path == DEFAULT_DEPLOY_HISTORY_PATH
     assert settings.kubectl_namespace is None
     assert settings.kubectl_context is None
+    assert settings.ollama_url == DEFAULT_OLLAMA_URL
+    assert settings.ollama_model == DEFAULT_OLLAMA_MODEL
 
 
 def test_env_overrides_llm_provider():
@@ -57,3 +61,14 @@ def test_env_overrides_runbook_dir():
 def test_env_overrides_deploy_history_path():
     settings = Settings.from_env(env={"ONCALL_AGENT_DEPLOY_HISTORY_PATH": "/tmp/deploys.jsonl"})
     assert settings.deploy_history_path == Path("/tmp/deploys.jsonl")
+
+
+def test_env_overrides_ollama_url_and_model():
+    settings = Settings.from_env(
+        env={
+            "ONCALL_AGENT_OLLAMA_URL": "http://ollama.internal:11434",
+            "ONCALL_AGENT_OLLAMA_MODEL": "mixtral",
+        }
+    )
+    assert settings.ollama_url == "http://ollama.internal:11434"
+    assert settings.ollama_model == "mixtral"

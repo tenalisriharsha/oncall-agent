@@ -72,10 +72,13 @@ def run_investigation(
         elif response.action == LLMAction.FORM_HYPOTHESIS:
             assert response.hypothesis is not None
             hypotheses.append(response.hypothesis)
+            event_type = (
+                EventType.HYPOTHESIS_REVISED if response.is_revision else EventType.HYPOTHESIS_FORMED
+            )
             audit.log(
                 AuditEvent(
                     incident_id=alert.id,
-                    event_type=EventType.HYPOTHESIS_FORMED,
+                    event_type=event_type,
                     payload=response.hypothesis.model_dump(mode="json"),
                 )
             )

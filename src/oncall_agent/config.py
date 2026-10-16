@@ -18,6 +18,8 @@ DEFAULT_LLM_PROVIDER = "scripted"
 DEFAULT_PROMETHEUS_URL = "http://localhost:9090"
 DEFAULT_RUNBOOK_DIR = Path("runbooks")
 DEFAULT_DEPLOY_HISTORY_PATH = Path(".oncall-agent/deploys.jsonl")
+DEFAULT_OLLAMA_URL = "http://localhost:11434"
+DEFAULT_OLLAMA_MODEL = "llama3.1"
 ENV_PREFIX = "ONCALL_AGENT_"
 
 
@@ -31,6 +33,8 @@ class Settings(BaseModel):
     kubectl_context: str | None = None
     runbook_dir: Path = DEFAULT_RUNBOOK_DIR
     deploy_history_path: Path = DEFAULT_DEPLOY_HISTORY_PATH
+    ollama_url: str = DEFAULT_OLLAMA_URL
+    ollama_model: str = DEFAULT_OLLAMA_MODEL
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -50,4 +54,8 @@ class Settings(BaseModel):
             kwargs["runbook_dir"] = value
         if (value := source.get(f"{ENV_PREFIX}DEPLOY_HISTORY_PATH")) is not None:
             kwargs["deploy_history_path"] = value
+        if (value := source.get(f"{ENV_PREFIX}OLLAMA_URL")) is not None:
+            kwargs["ollama_url"] = value
+        if (value := source.get(f"{ENV_PREFIX}OLLAMA_MODEL")) is not None:
+            kwargs["ollama_model"] = value
         return cls(**kwargs)

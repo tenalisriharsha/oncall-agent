@@ -76,7 +76,8 @@ TEMPLATE = """<!doctype html>
     color: #c9d1d9;
     font-size: 13.5px;
     line-height: 1.55;
-    white-space: pre;
+    white-space: pre-wrap;
+    word-break: break-word;
     overflow-x: auto;
   }}
   .prompt {{
@@ -108,9 +109,18 @@ TEMPLATE = """<!doctype html>
 
 
 def run_capture(args: list[str], label: str, filename: str) -> None:
-    command_display = "oncall-agent " + " ".join(args)
+    _capture([str(BIN), *args], "oncall-agent " + " ".join(args), label, filename)
+
+
+def run_shell_capture(argv: list[str], command_display: str, label: str, filename: str) -> None:
+    """Like :func:`run_capture`, but for a plain shell command (e.g. ``cat``)
+    rather than the ``oncall-agent`` binary — used to show real file output."""
+    _capture(argv, command_display, label, filename)
+
+
+def _capture(argv: list[str], command_display: str, label: str, filename: str) -> None:
     result = subprocess.run(
-        [str(BIN), *args],
+        argv,
         cwd=REPO_ROOT,
         env=ENV,
         capture_output=True,
@@ -180,6 +190,29 @@ def main() -> None:
         "oncall-agent demo --scenario bogus (invalid input)",
         "07-demo-invalid-scenario",
     )
+
+    report_path = "docs-demo-report.md"
+    (REPO_ROOT / report_path).unlink(missing_ok=True)
+    run_capture(
+        [
+            "demo",
+            "--scenario",
+            "unknown",
+            "--audit-log",
+            audit_log,
+            "--report",
+            report_path,
+        ],
+        "oncall-agent demo --scenario unknown --report docs-demo-report.md",
+        "08-demo-report-export",
+    )
+    run_shell_capture(
+        ["cat", report_path],
+        f"cat {report_path}",
+        "cat docs-demo-report.md",
+        "09-report-markdown-output",
+    )
+    (REPO_ROOT / report_path).unlink(missing_ok=True)
 
     (REPO_ROOT / audit_log).unlink(missing_ok=True)
 

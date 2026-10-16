@@ -49,6 +49,9 @@ class LLMResponse(BaseModel):
     tool_arguments: dict[str, Any] = Field(default_factory=dict)
     hypothesis: Hypothesis | None = None
     diagnosis: Diagnosis | None = None
+    # True when `hypothesis` replaces an earlier one because new evidence
+    # contradicted it, rather than being the first guess.
+    is_revision: bool = False
 
 
 class LLMProvider(ABC):

@@ -1,3 +1,4 @@
+import json
 import subprocess
 
 import requests
@@ -17,6 +18,13 @@ def test_config_command_shows_default_provider():
     result = CliRunner().invoke(main, ["config"])
     assert result.exit_code == 0
     assert "scripted" in result.output
+
+
+def test_config_command_shows_ollama_settings():
+    result = CliRunner().invoke(main, ["config"])
+    assert result.exit_code == 0
+    assert "ollama" in result.output.lower()
+    assert "prometheus_url" in result.output.lower() or "localhost:9090" in result.output
 
 
 def test_demo_deploy_regression_scenario(tmp_path):
@@ -45,6 +53,93 @@ def test_demo_unknown_scenario(tmp_path):
     )
     assert result.exit_code == 0
     assert "escalate" in result.output.lower()
+    assert "hypotheses considered" in result.output.lower()
+
+
+def test_demo_with_report_writes_markdown_file(tmp_path):
+    log_path = tmp_path / "audit.jsonl"
+    report_path = tmp_path / "report.md"
+    result = CliRunner().invoke(
+        main,
+        [
+            "demo",
+            "--scenario",
+            "deploy-regression",
+            "--audit-log",
+            str(log_path),
+            "--report",
+            str(report_path),
+        ],
+    )
+    assert result.exit_code == 0
+    assert report_path.exists()
+    assert "Incident report" in report_path.read_text()
+
+
+def test_demo_with_ollama_provider(tmp_path, monkeypatch):
+    log_path = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("ONCALL_AGENT_LLM_PROVIDER", "ollama")
+
+    script = [
+        {
+            "action": "call_tool",
+            "tool_name": "get_recent_deploys",
+            "tool_arguments": {"service": "checkout-service"},
+        },
+        {
+            "action": "form_hypothesis",
+            "hypothesis": {"statement": "bad deploy", "confidence": 0.7},
+        },
+        {
+            "action": "diagnose",
+            "diagnosis": {
+                "root_cause": "bad deploy",
+                "confidence": 0.8,
+                "proposed_fix": "roll back",
+            },
+        },
+    ]
+    responses = iter(script)
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.status_code = 200
+            self._payload = payload
+            self.text = ""
+
+        def json(self):
+            return {"response": json.dumps(self._payload)}
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResponse(next(responses)))
+
+    result = CliRunner().invoke(
+        main, ["demo", "--scenario", "deploy-regression", "--audit-log", str(log_path)]
+    )
+
+    assert result.exit_code == 0
+    assert "bad deploy" in result.output.lower()
+
+
+def test_demo_with_report_format_json(tmp_path):
+    log_path = tmp_path / "audit.jsonl"
+    report_path = tmp_path / "report.json"
+    result = CliRunner().invoke(
+        main,
+        [
+            "demo",
+            "--scenario",
+            "oom",
+            "--audit-log",
+            str(log_path),
+            "--report",
+            str(report_path),
+            "--report-format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0
+    data = json.loads(report_path.read_text())
+    assert data["diagnosis"]["root_cause"]
 
 
 def test_audit_command_with_no_events_warns(tmp_path):

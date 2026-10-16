@@ -57,6 +57,23 @@ def test_oom_scenario_reaches_diagnosis(tmp_path: Path):
     assert "memory" in diagnosis.proposed_fix.lower()
 
 
+def test_old_deploy_with_no_pod_signal_replans_before_diagnosing(tmp_path: Path):
+    alert = Alert(title="Elevated latency", description="p99 up 3x", service="checkout-service")
+    audit = AuditTrail(tmp_path / "audit.jsonl")
+    registry = make_registry(minutes_since_last_deploy=180, restarts=0, oom_killed=False)
+
+    diagnosis = run_investigation(alert, ScriptedPolicyProvider(), registry, audit)
+
+    assert "dependency" in diagnosis.root_cause.lower()
+    assert len(diagnosis.hypotheses_considered) == 2
+
+    events = audit.for_incident(alert.id)
+    event_types = [e.event_type for e in events]
+    assert EventType.HYPOTHESIS_FORMED in event_types
+    assert EventType.HYPOTHESIS_REVISED in event_types
+    assert event_types[-1] == EventType.DIAGNOSIS_REACHED
+
+
 def test_audit_trail_records_every_tool_call(tmp_path: Path):
     alert = Alert(title="t", description="d", service="checkout-service")
     audit = AuditTrail(tmp_path / "audit.jsonl")

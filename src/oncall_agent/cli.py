@@ -19,6 +19,7 @@ from .config import Settings
 from .investigation import run_investigation
 from .llm import get_provider
 from .models import Alert, Severity
+from .report import REPORT_FORMATS, export_report
 from .tools import FakePodStatusTool, FakeRecentDeploysTool, ToolRegistry
 from .tools.deploys import DeployHistoryStore, DeployHistoryTool, DeployRecord
 from .tools.kubectl import KubectlClient, KubectlError, KubectlLogsTool, KubectlPodStatusTool
@@ -84,6 +85,13 @@ def config_cmd() -> None:
     table.add_column("value")
     table.add_row("llm_provider", settings.llm_provider)
     table.add_row("audit_log_path", str(settings.audit_log_path))
+    table.add_row("prometheus_url", settings.prometheus_url)
+    table.add_row("kubectl_namespace", settings.kubectl_namespace or "(default context namespace)")
+    table.add_row("kubectl_context", settings.kubectl_context or "(current context)")
+    table.add_row("runbook_dir", str(settings.runbook_dir))
+    table.add_row("deploy_history_path", str(settings.deploy_history_path))
+    table.add_row("ollama_url", settings.ollama_url)
+    table.add_row("ollama_model", settings.ollama_model)
     console.print(table)
 
 
@@ -101,7 +109,21 @@ def config_cmd() -> None:
     default=None,
     help="Where to append the audit trail. Defaults to the configured path.",
 )
-def demo(scenario: str, audit_log_path: str | None) -> None:
+@click.option(
+    "--report",
+    "report_path",
+    default=None,
+    help="If given, export the structured diagnosis report to this path.",
+)
+@click.option(
+    "--report-format",
+    "report_format",
+    type=click.Choice(REPORT_FORMATS),
+    default="markdown",
+    show_default=True,
+    help="Format for --report.",
+)
+def demo(scenario: str, audit_log_path: str | None, report_path: str | None, report_format: str) -> None:
     """Run a full canned investigation with the scripted policy provider."""
     settings = Settings.from_env()
     log_path = audit_log_path or str(settings.audit_log_path)
@@ -126,7 +148,10 @@ def demo(scenario: str, audit_log_path: str | None) -> None:
         FakePodStatusTool(restarts=params["pod_restarts"], oom_killed=params["oom_killed"])
     )
 
-    provider = get_provider(settings.llm_provider)
+    if settings.llm_provider == "ollama":
+        provider = get_provider("ollama", base_url=settings.ollama_url, model=settings.ollama_model)
+    else:
+        provider = get_provider(settings.llm_provider)
     audit = AuditTrail(log_path)
 
     console.print(
@@ -139,18 +164,24 @@ def demo(scenario: str, audit_log_path: str | None) -> None:
 
     diagnosis = run_investigation(alert, provider, tools, audit)
 
-    console.print(
-        Panel(
-            f"[bold]Root cause:[/bold] {diagnosis.root_cause}\n"
-            f"[bold]Confidence:[/bold] {diagnosis.confidence:.2f}\n"
-            f"[bold]Proposed fix:[/bold] {diagnosis.proposed_fix}\n"
-            f"[bold]Requires approval:[/bold] {diagnosis.requires_approval}\n\n"
-            f"[bold]Evidence:[/bold]\n" + "\n".join(f"  - {e}" for e in diagnosis.evidence),
-            title="Diagnosis",
-            border_style="green",
-        )
+    body = (
+        f"[bold]Root cause:[/bold] {diagnosis.root_cause}\n"
+        f"[bold]Confidence:[/bold] {diagnosis.confidence:.2f}\n"
+        f"[bold]Proposed fix:[/bold] {diagnosis.proposed_fix}\n"
+        f"[bold]Requires approval:[/bold] {diagnosis.requires_approval}\n\n"
+        f"[bold]Evidence:[/bold]\n" + "\n".join(f"  - {e}" for e in diagnosis.evidence)
     )
+    if diagnosis.hypotheses_considered:
+        body += "\n\n[bold]Hypotheses considered (ranked by confidence):[/bold]\n" + "\n".join(
+            f"  {i}. ({h.confidence:.2f}) {h.statement}"
+            for i, h in enumerate(diagnosis.hypotheses_considered, start=1)
+        )
+    console.print(Panel(body, title="Diagnosis", border_style="green"))
     console.print(f"[dim]Audit trail written to {log_path}[/dim]")
+
+    if report_path:
+        written = export_report(alert, diagnosis, report_path, fmt=report_format)
+        console.print(f"[dim]Diagnosis report written to {written}[/dim]")
 
 
 @main.command(name="audit")
