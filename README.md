@@ -13,21 +13,23 @@ This project is being built in public, one night at a time. See
 [`PROGRESS.md`](PROGRESS.md) for the full architecture, the phased build
 plan, and exactly where work left off.
 
-**Current phase:** Phases 1–3 are complete — domain models, an
+**Current phase:** Phases 1–4 are complete — domain models, an
 append-only audit trail, a pluggable LLM provider interface with a
 deterministic scripted policy, the investigate → hypothesize →
 diagnose loop, real Prometheus/kubectl/runbook/deploy-history clients
 alongside the original fakes, multi-hypothesis ranking with
 contradiction-triggered re-planning, an optional local-model provider
-(Ollama), structured diagnosis report export (Markdown/JSON), and a
-CLI, all backed by a full test suite.
+(Ollama), structured diagnosis report export (Markdown/JSON), a human
+approval gate (CLI prompt and Slack) in front of every state-changing
+action, action executors that only run once a human has said yes, and
+a CLI, all backed by a full test suite.
 
 ## Preview
 
 All screenshots below are real terminal output from the commands shown
 — nothing hand-typed or edited.
 
-**`oncall-agent --help`** — the five top-level commands:
+**`oncall-agent --help`** — the six top-level commands:
 
 ![CLI help](docs/screenshots/01-cli-help.png)
 
@@ -63,6 +65,18 @@ All screenshots below are real terminal output from the commands shown
 
 ![Exported Markdown diagnosis report](docs/screenshots/09-report-markdown-output.png)
 
+**`oncall-agent demo --scenario deploy-regression --approval cli`** — approving the proposed rollback at the terminal prompt runs it (as a dry run, since `demo` only ever has fake evidence to act on):
+
+![CLI approval gate, approved](docs/screenshots/10-demo-approval-cli-approved.png)
+
+**`oncall-agent demo --scenario deploy-regression --approval cli`** — saying no at the same prompt stops before anything executes:
+
+![CLI approval gate, rejected](docs/screenshots/11-demo-approval-cli-rejected.png)
+
+**`oncall-agent approve`** — the manual stand-in for clicking "Approve" on a Slack message; a real Slack app would append to this same decision inbox from its Events API callback, and a `SlackApprovalGate` polling that incident picks it up from there:
+
+![Recording a Slack-style approval decision](docs/screenshots/12-approve-command.png)
+
 ## Why this exists
 
 Real incident response is a loop: look at evidence, form a theory, look
@@ -91,12 +105,16 @@ answer but how the agent got there and what else it considered.
 
 ```
 src/oncall_agent/
-├── models.py          Alert, Hypothesis, Diagnosis, ToolCallRecord, AuditEvent
+├── models.py          Alert, Hypothesis, Diagnosis, ToolCallRecord, AuditEvent,
+│                       ActionType, ApprovalDecision, ActionResult, IncidentResponse
 ├── audit.py            AuditTrail — append-only JSON-lines audit log
 ├── config.py            Settings — env-driven configuration (ONCALL_AGENT_*)
 ├── investigation.py    the investigate -> hypothesize -> diagnose loop
 ├── reasoning.py         rank_hypotheses / current_hypothesis — multi-hypothesis comparison
 ├── report.py             export_report — Markdown/JSON diagnosis report export
+├── approval.py           ApprovalGate — CLIApprovalGate, SlackApprovalGate, AutoApprovalGate
+├── actions.py            ActionExecutor — kubectl-backed and dry-run (Noop) executors
+├── response.py           respond_to_incident — investigation + approval gate + action execution
 ├── llm/
 │   ├── base.py          LLMProvider / LLMRequest / LLMResponse contract
 │   ├── scripted.py      ScriptedPolicyProvider — deterministic default, re-plans on contradiction
@@ -109,7 +127,7 @@ src/oncall_agent/
 │   ├── kubectl.py        KubectlClient — get/describe/logs only, never a write
 │   ├── deploys.py        DeployHistoryStore/Tool — append-only deploy ledger
 │   └── runbooks.py       RunbookSearchTool — keyword search over runbooks/*.md
-└── cli.py               click CLI: version, config, demo, audit, tools
+└── cli.py               click CLI: version, config, demo, audit, approve, tools
 ```
 
 `tools/` ships two implementations of the same `Tool` interface: the
@@ -126,9 +144,19 @@ next decision as JSON) both satisfy the exact same `LLMProvider`
 contract, so `get_provider(name)` is the only place that knows which
 one it handed back.
 
-Full phase-by-phase plan (richer reasoning, the Slack approval gate,
-the chaos-kit simulator, the scorecard) is in
-[`PROGRESS.md`](PROGRESS.md).
+`response.py` ships the same pattern one layer above the investigation
+loop: `respond_to_incident` runs `run_investigation` unchanged, and only
+if the resulting `Diagnosis.action` is a mutating one (not `None` and
+not `ESCALATE`) does it ask an `ApprovalGate` — `CLIApprovalGate`
+(prompts the terminal), `SlackApprovalGate` (posts to Slack and polls a
+decision inbox), or `AutoApprovalGate` (approves immediately, for
+scripted/CI runs) — before handing the action to an `ActionRegistry`.
+Nothing in `run_investigation` itself knows an approval gate exists;
+`respond_to_incident` is a pure wrapper, same as every other
+provider/tool swap in this codebase.
+
+Full phase-by-phase plan (the chaos-kit incident simulator, the
+scorecard) is in [`PROGRESS.md`](PROGRESS.md).
 
 ## Installation
 
@@ -159,8 +187,16 @@ oncall-agent demo --scenario unknown
 oncall-agent demo --scenario unknown --report incident-report.md
 oncall-agent demo --scenario unknown --report incident-report.json --report-format json
 
+# run a full investigation and gate the proposed action on human approval
+oncall-agent demo --scenario deploy-regression --approval cli    # prompts y/n at the terminal
+oncall-agent demo --scenario oom --approval auto                 # auto-approves, no human (CI/scripted runs)
+
 # inspect the audit trail an investigation left behind
 oncall-agent audit
+
+# record a Slack-style approval decision (the human side of SlackApprovalGate's inbox)
+oncall-agent approve alert-abc123 --approver alice
+oncall-agent approve alert-abc123 --approver alice --reject --reason "too risky, escalate instead"
 
 # call a real read-only tool directly, outside an investigation
 oncall-agent tools query-prometheus 'up{job="checkout-service"}' --url http://localhost:9090
@@ -205,17 +241,38 @@ the CLI needs to change. It needs network access to the Ollama server,
 which is exactly why it isn't the default: tests and CI stay on the
 scripted policy.
 
+By default `demo` stops at the diagnosis, same as Phases 1–3 (pass
+`--approval skip`, or nothing — it's the default). `--approval cli`
+runs the full `respond_to_incident` flow and blocks on a y/n prompt for
+any proposed action that isn't a plain escalation; `--approval auto`
+runs the same flow but approves immediately, which is what scripted
+demos and screenshots use so nothing hangs waiting on a human. Either
+way the action itself runs through `ActionRegistry.noop()` — a dry-run
+executor — since `demo`'s evidence is all fake and there is no real
+deployment to act on. The real, kubectl-backed executors
+(`ActionRegistry.kubectl(...)`) are reachable programmatically the same
+way the Phase 2 clients are: built to be registered once a live
+investigation mode exists, not yet exposed as a CLI shortcut that would
+let an action run outside the approval gate.
+
+A `SlackApprovalGate` posts the same approval request to a Slack
+webhook (or prints it, if `ONCALL_AGENT_SLACK_WEBHOOK_URL` isn't set)
+and then polls a `SlackDecisionInbox` — a JSON-lines file — for the
+decision. `oncall-agent approve` is the manual stand-in for the Slack
+button click a real deployment would wire up via the Events API: it
+appends the same decision shape to the same inbox.
+
 ## Testing
 
 ```bash
 pytest -q --cov=oncall_agent
 ```
 
-136 tests, 99% statement coverage, no network access or API key
+185 tests, 99% statement coverage, no network access or API key
 required — this is also what CI runs. The real Prometheus/kubectl
-clients and the optional Ollama provider are all tested by mocking the
-HTTP/subprocess boundary, so the suite never needs a live cluster,
-metrics backend, or local model.
+clients, the optional Ollama provider, and the Slack approval gate are
+all tested by mocking the HTTP/subprocess boundary, so the suite never
+needs a live cluster, metrics backend, local model, or Slack workspace.
 
 ## License
 

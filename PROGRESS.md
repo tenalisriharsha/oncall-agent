@@ -59,7 +59,18 @@ fakes (deterministic, needed for reproducible scenarios and
 screenshots); the real clients are reachable directly via
 `oncall-agent tools <name>` and are built to be registered into the
 same `ToolRegistry` the loop reads from once a "live" investigation
-mode (Phase 4+) needs live evidence instead of canned evidence.
+mode needs live evidence instead of canned evidence.
+
+Phase 4 added a layer *above* the loop rather than inside it:
+`response.respond_to_incident()` calls `run_investigation()` completely
+unchanged, then — only if the resulting `Diagnosis.action` is a
+mutating one — asks an `ApprovalGate` (`approval.py`: `CLIApprovalGate`,
+`SlackApprovalGate`, `AutoApprovalGate`) and, once approved, hands the
+action to an `ActionRegistry` (`actions.py`: kubectl-backed executors or
+a dry-run `NoopActionExecutor` registry) via `execute_action()`, which
+refuses anything without an `APPROVED` decision and always logs the
+outcome. `run_investigation()` itself has zero awareness any of this
+exists — same pattern Phase 3 used for re-planning.
 
 ## Phased build plan
 
@@ -113,12 +124,43 @@ mode (Phase 4+) needs live evidence instead of canned evidence.
     `oncall-agent demo --report PATH [--report-format markdown|json]`
   - Full test suite (136 tests, 99% statement coverage)
 
-- [ ] **Phase 4 — Human approval gate**
-  - Every state-changing action (restart, rollback, scale) blocked pending approval
-  - CLI approval prompt
-  - Slack approval integration
-  - Action executors for approved fixes
-  - Approval decisions themselves written to the audit trail
+- [x] **Phase 4 — Human approval gate** (Night 4)
+  - `models.py`: `ActionType` (`restart`/`rollback`/`scale`/`escalate`),
+    `Diagnosis.action`/`action_arguments` (the machine-actionable shape of
+    `proposed_fix`), `ApprovalDecision`, `ActionResult`, `IncidentResponse`,
+    and a new `EventType.ACTION_EXECUTED`
+  - `ScriptedPolicyProvider` now tags every diagnosis with the `ActionType`
+    its `proposed_fix` implies: deploy regression -> `ROLLBACK` (to the
+    previous version), OOM -> `SCALE` (replica bump), anything that
+    escalates to a human (dependency failure, or no signal at all) ->
+    `ESCALATE` — the one action type that never needs approval, since it
+    never mutates anything
+  - `approval.py`: `ApprovalGate` contract plus three implementations —
+    `CLIApprovalGate` (blocking y/n terminal prompt), `AutoApprovalGate`
+    (approves immediately, for scripted/CI runs), and `SlackApprovalGate`
+    (posts to a Slack webhook, or prints if none is configured, then polls
+    a `SlackDecisionInbox` — a JSON-lines file standing in for what a real
+    Slack Events API handler would append to on a button click)
+  - `actions.py`: `ActionExecutor` contract, `KubectlMutationClient` (a
+    second, narrower kubectl chokepoint restricted to `rollout`/`scale` —
+    deliberately a separate class from the read-only `tools/kubectl.py`
+    client so that client's "nothing here can mutate a cluster" guarantee
+    stays true for every existing caller), `RestartActionExecutor`/
+    `RollbackActionExecutor`/`ScaleActionExecutor`, a dry-run
+    `NoopActionExecutor` (what `demo` uses, since its evidence is fake),
+    `ActionRegistry`, and `execute_action()` — the single chokepoint that
+    refuses to run anything without an `APPROVED` decision and always logs
+    the outcome (success or failure) to the audit trail
+  - `response.py`: `respond_to_incident()` — investigate, then gate any
+    actionable fix on approval, then execute if approved. A pure wrapper
+    around the unchanged `run_investigation()`, same layering Phase 3 used
+  - CLI: `oncall-agent demo --approval {skip,cli,auto}` (default `skip`,
+    so every pre-Phase-4 `demo` invocation is byte-for-byte unchanged) and
+    a new `oncall-agent approve <incident-id> --approver NAME [--reject]
+    [--reason TEXT]` command — the manual stand-in for the Slack button
+    click, writing to the same decision inbox `SlackApprovalGate` polls
+  - New `Settings` fields `slack_webhook_url`/`slack_decision_inbox_path`
+  - Full test suite (185 tests, 99% statement coverage)
 
 - [ ] **Phase 5 — Incident simulator**
   - chaos-kit-based fault injection
@@ -132,35 +174,50 @@ mode (Phase 4+) needs live evidence instead of canned evidence.
 
 ## Where to resume
 
-**Next session: start Phase 4 — human approval gate.** Diagnoses
-already carry `requires_approval: bool` (always `True` today) but
-nothing currently blocks on it — the loop returns the `Diagnosis` and
-stops. Phase 4 should add an approval step after `DIAGNOSE` for any
-proposed fix that's actually state-changing: a CLI prompt first (ask
-y/n, log the decision), a Slack integration second, and then
-"action executors" that are only allowed to run once a human has said
-yes, with the approval decision itself written to the audit trail
-(`EventType.APPROVAL_REQUESTED`/`APPROVAL_DECIDED` already exist in
-`models.py`, unused since Phase 1 — this is what they're for).
+**Next session: start Phase 5 — incident simulator.** This needs a
+fault-injection mechanism (chaos-kit or a hand-rolled equivalent — worth
+checking what chaos-kit actually gives you before committing to the
+dependency, since the whole rest of this project has stayed
+dependency-light on purpose) and 5-6 scenario definitions (bad deploy,
+OOM, dependency outage, network partition, disk pressure, config drift
+— the `runbooks/` corpus already has one markdown runbook per scenario
+from Phase 2, which is a reasonable source of truth for what each
+scenario should actually inject). The scenario runner fires an `Alert`
+against the injected fault and lets `respond_to_incident()` (Phase 4)
+investigate and act on it end to end, auto-approving
+(`AutoApprovalGate`) so the simulator can run unattended.
+
+The real Phase 2 tools (`tools/prometheus.py`, `tools/kubectl.py`,
+`tools/runbooks.py`, `tools/deploys.py`) are still only reachable
+standalone via `oncall-agent tools <name>` — not yet wired into
+`run_investigation`/the `demo` command, since `demo` needs
+deterministic, canned evidence for reproducible scenarios and
+screenshots. The simulator is exactly the place this finally matters:
+each scenario should inject a fault into *real* state (a local
+Prometheus, a kind/minikube cluster, or fakes dressed up to look like
+them) and register the real tools into a `ToolRegistry`, not the fakes
+`demo` uses. Phase 4's `ActionRegistry.kubectl(...)` (real, kubectl-
+backed executors) is already built for this and currently unused
+outside its own tests — the simulator is its first real caller.
 
 The scripted policy's re-planning (Phase 3) only revises once, and only
 when pod health shows *zero* signal at all (no restarts, no OOM) — a
 deliberately narrow trigger chosen so every Phase 1/2 test fixture
 (which builds `Hypothesis` objects without a `category`) stays
-untouched. If Phase 4 or later adds more tool types, the same pattern
-— tag hypotheses with `category`, check `current_hypothesis(...)` before
-acting on one — is the way to add more contradiction checks without
-risking the existing ones.
+untouched. The same pattern — tag hypotheses with `category`, check
+`current_hypothesis(...)` before acting on one — is the way to add more
+contradiction checks as the simulator's scenarios exercise paths the
+scripted policy doesn't handle well yet (e.g. network partition and
+config drift have no dedicated category today; they'll fall through to
+the generic "no deploy, no OOM -> escalate" branch, which may or may not
+be the right call once there's a scenario actually testing it).
 
-The real Phase 2 tools (`tools/prometheus.py`, `tools/kubectl.py`,
-`tools/runbooks.py`, `tools/deploys.py`) are currently only reachable
-standalone via `oncall-agent tools <name>` — they are not yet wired
-into `run_investigation`/the `demo` command, since `demo` still needs
-deterministic, canned evidence for reproducible scenarios and
-screenshots. Wiring a "live" investigation mode that registers the
-real tools into a `ToolRegistry` instead of the fakes is reasonable
-scope for Phase 4+, once an approval gate exists to stop that live mode
-from ever acting on a cluster unsupervised.
+`SlackApprovalGate` (Phase 4) is tested only against a mocked
+`requests.post` and a `SlackDecisionInbox` file — there is no real
+Slack Events API endpoint behind `oncall-agent approve`, by design (that
+would need a hosted webhook receiver, out of scope for a local-only
+project). If a real Slack app ever gets wired up, it should append to
+the same `SlackDecisionInbox` shape `approve` already writes.
 
 `OllamaProvider` (Phase 3) is untested against a real Ollama server —
 only against a mocked HTTP boundary, same pattern as the Prometheus/
@@ -173,6 +230,7 @@ compares to the scripted policy's canned decision tree — the prompt in
 No integration tests against a live Prometheus/cluster exist yet
 (the `integration` pytest marker is registered in `pyproject.toml` but
 unused) — add them if/when a live cluster or Prometheus becomes
-available to test against; they should stay skipped by default.
+available to test against; they should stay skipped by default. Phase 5
+is the first phase where that marker is likely to actually get used.
 
 STATUS: IN_PROGRESS
