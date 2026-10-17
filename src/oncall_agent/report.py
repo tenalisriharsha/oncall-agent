@@ -40,6 +40,7 @@ def render_markdown(alert: Alert, diagnosis: Diagnosis) -> str:
         f"**Confidence:** {diagnosis.confidence:.2f}",
         f"**Proposed fix:** {diagnosis.proposed_fix}",
         f"**Requires approval:** {diagnosis.requires_approval}",
+        f"**Action:** {diagnosis.action.value if diagnosis.action else '(none)'}",
         "",
         "### Evidence",
         "",

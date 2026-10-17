@@ -17,9 +17,11 @@ transparency.
 
 from __future__ import annotations
 
-from ..models import Diagnosis, Hypothesis
+from ..models import ActionType, Diagnosis, Hypothesis
 from ..reasoning import current_hypothesis, rank_hypotheses
 from .base import LLMAction, LLMProvider, LLMRequest, LLMResponse
+
+SCALE_UP_REPLICAS = 6
 
 DEPLOY_REGRESSION_WINDOW_MINUTES = 30
 
@@ -165,6 +167,8 @@ class ScriptedPolicyProvider(LLMProvider):
                 ),
                 requires_approval=True,
                 hypotheses_considered=ranked,
+                action=ActionType.ESCALATE,
+                action_arguments={"service": request.alert.service},
             )
 
         minutes = deploy_result.get("minutes_since_last_deploy")
@@ -184,6 +188,8 @@ class ScriptedPolicyProvider(LLMProvider):
                 proposed_fix=f"Roll back {request.alert.service} to {previous_version}.",
                 requires_approval=True,
                 hypotheses_considered=ranked,
+                action=ActionType.ROLLBACK,
+                action_arguments={"service": request.alert.service, "to_version": previous_version},
             )
 
         if pod_result.get("oom_killed"):
@@ -198,6 +204,8 @@ class ScriptedPolicyProvider(LLMProvider):
                 ),
                 requires_approval=True,
                 hypotheses_considered=ranked,
+                action=ActionType.SCALE,
+                action_arguments={"service": request.alert.service, "replicas": SCALE_UP_REPLICAS},
             )
 
         return Diagnosis(
@@ -210,4 +218,6 @@ class ScriptedPolicyProvider(LLMProvider):
             proposed_fix=f"Escalate {request.alert.service} to a human on-call engineer.",
             requires_approval=True,
             hypotheses_considered=ranked,
+            action=ActionType.ESCALATE,
+            action_arguments={"service": request.alert.service},
         )

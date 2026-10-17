@@ -4,11 +4,16 @@ import pytest
 from pydantic import ValidationError
 
 from oncall_agent.models import (
+    ActionResult,
+    ActionType,
     Alert,
+    ApprovalDecision,
+    ApprovalStatus,
     AuditEvent,
     Diagnosis,
     EventType,
     Hypothesis,
+    IncidentResponse,
     Severity,
     ToolCallRecord,
 )
@@ -75,6 +80,63 @@ def test_diagnosis_hypotheses_considered_round_trips():
 
 def test_event_type_includes_hypothesis_revised():
     assert EventType.HYPOTHESIS_REVISED.value == "hypothesis_revised"
+
+
+def test_event_type_includes_action_executed():
+    assert EventType.ACTION_EXECUTED.value == "action_executed"
+
+
+def test_diagnosis_action_defaults_to_none():
+    diagnosis = Diagnosis(root_cause="bad deploy", confidence=0.9, proposed_fix="roll back")
+    assert diagnosis.action is None
+    assert diagnosis.action_arguments == {}
+
+
+def test_diagnosis_action_round_trips():
+    diagnosis = Diagnosis(
+        root_cause="bad deploy",
+        confidence=0.9,
+        proposed_fix="roll back",
+        action=ActionType.ROLLBACK,
+        action_arguments={"service": "checkout-service", "to_version": "v1"},
+    )
+    restored = Diagnosis.model_validate_json(diagnosis.model_dump_json())
+    assert restored.action == ActionType.ROLLBACK
+    assert restored.action_arguments == {"service": "checkout-service", "to_version": "v1"}
+
+
+def test_approval_decision_defaults_reason_to_empty_string():
+    decision = ApprovalDecision(incident_id="alert-1", status=ApprovalStatus.APPROVED, approver="alice")
+    assert decision.reason == ""
+
+
+def test_approval_decision_round_trips():
+    decision = ApprovalDecision(
+        incident_id="alert-1", status=ApprovalStatus.REJECTED, approver="alice", reason="too risky"
+    )
+    restored = ApprovalDecision.model_validate_json(decision.model_dump_json())
+    assert restored.status == ApprovalStatus.REJECTED
+    assert restored.reason == "too risky"
+
+
+def test_action_result_round_trips():
+    result = ActionResult(
+        incident_id="alert-1",
+        action=ActionType.SCALE,
+        arguments={"service": "checkout-service", "replicas": 6},
+        success=True,
+        output="scaled",
+    )
+    restored = ActionResult.model_validate_json(result.model_dump_json())
+    assert restored.action == ActionType.SCALE
+    assert restored.success is True
+
+
+def test_incident_response_defaults_approval_and_action_result_to_none():
+    diagnosis = Diagnosis(root_cause="unknown", confidence=0.3, proposed_fix="escalate")
+    response = IncidentResponse(diagnosis=diagnosis)
+    assert response.approval is None
+    assert response.action_result is None
 
 
 def test_tool_call_record_defaults():

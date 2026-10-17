@@ -20,6 +20,7 @@ DEFAULT_RUNBOOK_DIR = Path("runbooks")
 DEFAULT_DEPLOY_HISTORY_PATH = Path(".oncall-agent/deploys.jsonl")
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "llama3.1"
+DEFAULT_SLACK_DECISION_INBOX_PATH = Path(".oncall-agent/slack_decisions.jsonl")
 ENV_PREFIX = "ONCALL_AGENT_"
 
 
@@ -35,6 +36,8 @@ class Settings(BaseModel):
     deploy_history_path: Path = DEFAULT_DEPLOY_HISTORY_PATH
     ollama_url: str = DEFAULT_OLLAMA_URL
     ollama_model: str = DEFAULT_OLLAMA_MODEL
+    slack_webhook_url: str | None = None
+    slack_decision_inbox_path: Path = DEFAULT_SLACK_DECISION_INBOX_PATH
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -58,4 +61,8 @@ class Settings(BaseModel):
             kwargs["ollama_url"] = value
         if (value := source.get(f"{ENV_PREFIX}OLLAMA_MODEL")) is not None:
             kwargs["ollama_model"] = value
+        if (value := source.get(f"{ENV_PREFIX}SLACK_WEBHOOK_URL")) is not None:
+            kwargs["slack_webhook_url"] = value
+        if (value := source.get(f"{ENV_PREFIX}SLACK_DECISION_INBOX_PATH")) is not None:
+            kwargs["slack_decision_inbox_path"] = value
         return cls(**kwargs)

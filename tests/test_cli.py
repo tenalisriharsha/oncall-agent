@@ -56,6 +56,86 @@ def test_demo_unknown_scenario(tmp_path):
     assert "hypotheses considered" in result.output.lower()
 
 
+def test_demo_with_auto_approval_executes_action(tmp_path):
+    log_path = tmp_path / "audit.jsonl"
+    result = CliRunner().invoke(
+        main,
+        ["demo", "--scenario", "deploy-regression", "--audit-log", str(log_path), "--approval", "auto"],
+    )
+    assert result.exit_code == 0
+    assert "Approval" in result.output
+    assert "approved" in result.output.lower()
+    assert "Action executed" in result.output
+
+
+def test_demo_with_cli_approval_prompts_and_approves(tmp_path):
+    log_path = tmp_path / "audit.jsonl"
+    result = CliRunner().invoke(
+        main,
+        ["demo", "--scenario", "deploy-regression", "--audit-log", str(log_path), "--approval", "cli"],
+        input="y\n",
+    )
+    assert result.exit_code == 0
+    assert "Approve this action?" in result.output
+    assert "approved" in result.output.lower()
+
+
+def test_demo_with_cli_approval_rejects_on_no(tmp_path):
+    log_path = tmp_path / "audit.jsonl"
+    result = CliRunner().invoke(
+        main,
+        ["demo", "--scenario", "deploy-regression", "--audit-log", str(log_path), "--approval", "cli"],
+        input="n\n",
+    )
+    assert result.exit_code == 0
+    assert "rejected" in result.output.lower()
+    assert "Action executed" not in result.output
+
+
+def test_demo_escalation_scenario_with_approval_skips_approval_panel(tmp_path):
+    log_path = tmp_path / "audit.jsonl"
+    result = CliRunner().invoke(
+        main,
+        ["demo", "--scenario", "unknown", "--audit-log", str(log_path), "--approval", "auto"],
+    )
+    assert result.exit_code == 0
+    assert "Approval" not in result.output
+
+
+def test_approve_command_records_approval(tmp_path):
+    inbox_path = tmp_path / "decisions.jsonl"
+    result = CliRunner().invoke(
+        main,
+        ["approve", "alert-123", "--approver", "alice", "--inbox", str(inbox_path)],
+    )
+    assert result.exit_code == 0
+    assert "Approved" in result.output
+    assert inbox_path.exists()
+    assert "alert-123" in inbox_path.read_text()
+    assert "alice" in inbox_path.read_text()
+
+
+def test_approve_command_records_rejection_with_reason(tmp_path):
+    inbox_path = tmp_path / "decisions.jsonl"
+    result = CliRunner().invoke(
+        main,
+        [
+            "approve",
+            "alert-123",
+            "--approver",
+            "alice",
+            "--reject",
+            "--reason",
+            "too risky",
+            "--inbox",
+            str(inbox_path),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Rejected" in result.output
+    assert "too risky" in inbox_path.read_text()
+
+
 def test_demo_with_report_writes_markdown_file(tmp_path):
     log_path = tmp_path / "audit.jsonl"
     report_path = tmp_path / "report.md"
