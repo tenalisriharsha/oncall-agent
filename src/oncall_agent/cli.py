@@ -14,17 +14,22 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__
+from .actions import ActionRegistry
+from .approval import AutoApprovalGate, CLIApprovalGate, SlackDecisionInbox
 from .audit import AuditTrail
 from .config import Settings
 from .investigation import run_investigation
 from .llm import get_provider
-from .models import Alert, Severity
+from .models import Alert, ApprovalDecision, ApprovalStatus, Severity
 from .report import REPORT_FORMATS, export_report
+from .response import respond_to_incident
 from .tools import FakePodStatusTool, FakeRecentDeploysTool, ToolRegistry
 from .tools.deploys import DeployHistoryStore, DeployHistoryTool, DeployRecord
 from .tools.kubectl import KubectlClient, KubectlError, KubectlLogsTool, KubectlPodStatusTool
 from .tools.prometheus import PrometheusClient, PrometheusQueryError, PrometheusQueryTool
 from .tools.runbooks import RunbookSearchTool
+
+APPROVAL_GATES = ("skip", "auto", "cli")
 
 console = Console()
 
@@ -92,6 +97,8 @@ def config_cmd() -> None:
     table.add_row("deploy_history_path", str(settings.deploy_history_path))
     table.add_row("ollama_url", settings.ollama_url)
     table.add_row("ollama_model", settings.ollama_model)
+    table.add_row("slack_webhook_url", settings.slack_webhook_url or "(not configured)")
+    table.add_row("slack_decision_inbox_path", str(settings.slack_decision_inbox_path))
     console.print(table)
 
 
@@ -123,7 +130,25 @@ def config_cmd() -> None:
     show_default=True,
     help="Format for --report.",
 )
-def demo(scenario: str, audit_log_path: str | None, report_path: str | None, report_format: str) -> None:
+@click.option(
+    "--approval",
+    "approval_gate_name",
+    type=click.Choice(APPROVAL_GATES),
+    default="skip",
+    show_default=True,
+    help=(
+        "Gate any proposed mutating action on human approval: 'skip' stops at the "
+        "diagnosis like before, 'cli' prompts at this terminal, 'auto' approves "
+        "immediately (no human, for scripted runs)."
+    ),
+)
+def demo(
+    scenario: str,
+    audit_log_path: str | None,
+    report_path: str | None,
+    report_format: str,
+    approval_gate_name: str,
+) -> None:
     """Run a full canned investigation with the scripted policy provider."""
     settings = Settings.from_env()
     log_path = audit_log_path or str(settings.audit_log_path)
@@ -162,7 +187,20 @@ def demo(scenario: str, audit_log_path: str | None, report_path: str | None, rep
         )
     )
 
-    diagnosis = run_investigation(alert, provider, tools, audit)
+    if approval_gate_name == "skip":
+        diagnosis = run_investigation(alert, provider, tools, audit)
+        approval = None
+        action_result = None
+    else:
+        approval_gate = (
+            CLIApprovalGate() if approval_gate_name == "cli" else AutoApprovalGate()
+        )
+        response = respond_to_incident(
+            alert, provider, tools, audit, approval_gate, action_registry=ActionRegistry.noop()
+        )
+        diagnosis = response.diagnosis
+        approval = response.approval
+        action_result = response.action_result
 
     body = (
         f"[bold]Root cause:[/bold] {diagnosis.root_cause}\n"
@@ -177,6 +215,23 @@ def demo(scenario: str, audit_log_path: str | None, report_path: str | None, rep
             for i, h in enumerate(diagnosis.hypotheses_considered, start=1)
         )
     console.print(Panel(body, title="Diagnosis", border_style="green"))
+
+    if approval is not None:
+        style = "green" if approval.status == ApprovalStatus.APPROVED else "red"
+        approval_body = f"[bold]Status:[/bold] {approval.status.value}\n[bold]Approver:[/bold] {approval.approver}"
+        if approval.reason:
+            approval_body += f"\n[bold]Reason:[/bold] {approval.reason}"
+        console.print(Panel(approval_body, title="Approval", border_style=style))
+
+    if action_result is not None:
+        style = "green" if action_result.success else "red"
+        action_body = (
+            f"[bold]Action:[/bold] {action_result.action.value}\n"
+            f"[bold]Success:[/bold] {action_result.success}\n"
+            f"[bold]Output:[/bold] {action_result.output}"
+        )
+        console.print(Panel(action_body, title="Action executed", border_style=style))
+
     console.print(f"[dim]Audit trail written to {log_path}[/dim]")
 
     if report_path:
@@ -221,6 +276,43 @@ def audit_cmd(audit_log_path: str | None, incident_id: str | None) -> None:
 def _summarize(payload: dict) -> str:
     text = str(payload)
     return text if len(text) <= 80 else text[:77] + "..."
+
+
+@main.command(name="approve")
+@click.argument("incident_id")
+@click.option("--approver", required=True, help="Who is recording this decision.")
+@click.option(
+    "--reject",
+    is_flag=True,
+    help="Reject the action instead of approving it (default is approve).",
+)
+@click.option("--reason", default="", help="Optional reason, especially useful for a rejection.")
+@click.option(
+    "--inbox",
+    "inbox_path",
+    default=None,
+    help="Slack decision inbox to write to. Defaults to the configured path.",
+)
+def approve_cmd(incident_id: str, approver: str, reject: bool, reason: str, inbox_path: str | None) -> None:
+    """Record a human approval decision for an incident awaiting one.
+
+    This is the manual stand-in for clicking "Approve"/"Reject" on a
+    Slack message: a real Slack app would append to this same inbox from
+    its Events API callback. A `SlackApprovalGate` polling that incident
+    picks the decision up and unblocks.
+    """
+    settings = Settings.from_env()
+    path = inbox_path or str(settings.slack_decision_inbox_path)
+    inbox = SlackDecisionInbox(path)
+    decision = ApprovalDecision(
+        incident_id=incident_id,
+        status=ApprovalStatus.REJECTED if reject else ApprovalStatus.APPROVED,
+        approver=approver,
+        reason=reason,
+    )
+    inbox.record(decision)
+    verb = "Rejected" if reject else "Approved"
+    console.print(f"[green]{verb}[/green] incident {incident_id} as {approver}.")
 
 
 @main.group()

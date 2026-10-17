@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from oncall_agent.models import Alert, Diagnosis, Hypothesis
+from oncall_agent.models import ActionType, Alert, Diagnosis, Hypothesis
 from oncall_agent.report import diagnosis_report_dict, export_report, render_markdown
 
 
@@ -35,6 +35,24 @@ def test_render_markdown_includes_core_fields():
     assert "Roll back checkout-service to v1." in markdown
     assert "Deploy 10 minutes before the alert." in markdown
     assert "deploy regression" in markdown
+
+
+def test_render_markdown_includes_action_when_present():
+    diagnosis = Diagnosis(
+        root_cause="bad deploy",
+        confidence=0.8,
+        proposed_fix="roll back",
+        action=ActionType.ROLLBACK,
+        action_arguments={"service": "checkout-service", "to_version": "v1"},
+    )
+    markdown = render_markdown(make_alert(), diagnosis)
+    assert "**Action:** rollback" in markdown
+
+
+def test_render_markdown_shows_none_action_placeholder():
+    diagnosis = Diagnosis(root_cause="unknown", confidence=0.3, proposed_fix="escalate")
+    markdown = render_markdown(make_alert(), diagnosis)
+    assert "**Action:** (none)" in markdown
 
 
 def test_render_markdown_without_hypotheses_omits_that_section():

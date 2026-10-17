@@ -1,6 +1,6 @@
 from oncall_agent.llm.base import LLMAction, LLMRequest
 from oncall_agent.llm.scripted import ScriptedPolicyProvider
-from oncall_agent.models import Alert, Hypothesis, ToolCallRecord
+from oncall_agent.models import ActionType, Alert, Hypothesis, ToolCallRecord
 
 
 def make_alert(**overrides) -> Alert:
@@ -76,6 +76,8 @@ def test_diagnoses_deploy_regression_with_rollback_fix():
     assert response.action == LLMAction.DIAGNOSE
     assert "v1" in response.diagnosis.proposed_fix
     assert response.diagnosis.requires_approval is True
+    assert response.diagnosis.action == ActionType.ROLLBACK
+    assert response.diagnosis.action_arguments == {"service": "checkout-service", "to_version": "v1"}
 
 
 def test_diagnoses_oom_without_recent_deploy():
@@ -96,6 +98,9 @@ def test_diagnoses_oom_without_recent_deploy():
     )
     assert response.action == LLMAction.DIAGNOSE
     assert "memory" in response.diagnosis.proposed_fix.lower()
+    assert response.diagnosis.action == ActionType.SCALE
+    assert response.diagnosis.action_arguments["service"] == "checkout-service"
+    assert response.diagnosis.action_arguments["replicas"] > 0
 
 
 def test_diagnoses_unknown_cause_when_no_signal_found():
@@ -116,6 +121,7 @@ def test_diagnoses_unknown_cause_when_no_signal_found():
     )
     assert response.action == LLMAction.DIAGNOSE
     assert response.diagnosis.confidence < 0.5
+    assert response.diagnosis.action == ActionType.ESCALATE
 
 
 def test_is_deterministic_for_same_input():
@@ -230,6 +236,7 @@ def test_diagnosis_after_revision_escalates_to_dependency_failure():
     assert response.action == LLMAction.DIAGNOSE
     assert "dependency" in response.diagnosis.proposed_fix.lower()
     assert response.diagnosis.hypotheses_considered == [hypotheses[1], hypotheses[0]]
+    assert response.diagnosis.action == ActionType.ESCALATE
 
 
 def test_diagnosis_always_attaches_ranked_hypotheses_considered():

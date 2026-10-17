@@ -72,3 +72,20 @@ def test_env_overrides_ollama_url_and_model():
     )
     assert settings.ollama_url == "http://ollama.internal:11434"
     assert settings.ollama_model == "mixtral"
+
+
+def test_slack_settings_default_to_none_and_local_path():
+    settings = Settings.from_env(env={})
+    assert settings.slack_webhook_url is None
+    assert settings.slack_decision_inbox_path == Path(".oncall-agent/slack_decisions.jsonl")
+
+
+def test_env_overrides_slack_webhook_url_and_inbox_path():
+    settings = Settings.from_env(
+        env={
+            "ONCALL_AGENT_SLACK_WEBHOOK_URL": "https://hooks.slack.test/abc",
+            "ONCALL_AGENT_SLACK_DECISION_INBOX_PATH": "/tmp/decisions.jsonl",
+        }
+    )
+    assert settings.slack_webhook_url == "https://hooks.slack.test/abc"
+    assert settings.slack_decision_inbox_path == Path("/tmp/decisions.jsonl")

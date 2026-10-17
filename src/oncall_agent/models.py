@@ -69,6 +69,20 @@ class Hypothesis(BaseModel):
     category: str | None = None
 
 
+class ActionType(str, Enum):
+    """The fixed menu of state-changing actions the agent can propose.
+
+    ``ESCALATE`` is the odd one out: it never mutates anything (it just
+    hands the incident to a human), so it is the one action type that
+    never needs to go through an :class:`~oncall_agent.approval.ApprovalGate`.
+    """
+
+    RESTART = "restart"
+    ROLLBACK = "rollback"
+    SCALE = "scale"
+    ESCALATE = "escalate"
+
+
 class Diagnosis(BaseModel):
     """The agent's final conclusion for an incident."""
 
@@ -78,6 +92,53 @@ class Diagnosis(BaseModel):
     proposed_fix: str
     requires_approval: bool = True
     hypotheses_considered: list[Hypothesis] = Field(default_factory=list)
+    # The machine-actionable shape of `proposed_fix`, if one exists. `None`
+    # means the fix has no automated executor (e.g. a vague escalation) and
+    # must remain a human-only follow-up.
+    action: ActionType | None = None
+    action_arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class ApprovalStatus(str, Enum):
+    """The outcome of asking a human whether a proposed action may run."""
+
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class ApprovalDecision(BaseModel):
+    """A human's answer to an approval request for one incident's action."""
+
+    incident_id: str
+    status: ApprovalStatus
+    approver: str
+    reason: str = ""
+    decided_at: datetime = Field(default_factory=_utcnow)
+
+
+class ActionResult(BaseModel):
+    """What happened when an approved action was actually executed."""
+
+    incident_id: str
+    action: ActionType
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    success: bool
+    output: str = ""
+    executed_at: datetime = Field(default_factory=_utcnow)
+
+
+class IncidentResponse(BaseModel):
+    """The full outcome of responding to one incident: diagnose, maybe
+    get approval, maybe act.
+
+    ``approval``/``action_result`` are ``None`` when the diagnosis never
+    reached that stage (e.g. no actionable fix, or approval was never
+    granted).
+    """
+
+    diagnosis: Diagnosis
+    approval: ApprovalDecision | None = None
+    action_result: ActionResult | None = None
 
 
 class EventType(str, Enum):
@@ -90,6 +151,7 @@ class EventType(str, Enum):
     DIAGNOSIS_REACHED = "diagnosis_reached"
     APPROVAL_REQUESTED = "approval_requested"
     APPROVAL_DECIDED = "approval_decided"
+    ACTION_EXECUTED = "action_executed"
 
 
 class AuditEvent(BaseModel):
