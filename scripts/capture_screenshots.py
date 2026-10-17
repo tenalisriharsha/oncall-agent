@@ -108,8 +108,8 @@ TEMPLATE = """<!doctype html>
 """
 
 
-def run_capture(args: list[str], label: str, filename: str) -> None:
-    _capture([str(BIN), *args], "oncall-agent " + " ".join(args), label, filename)
+def run_capture(args: list[str], label: str, filename: str, stdin_text: str | None = None) -> None:
+    _capture([str(BIN), *args], "oncall-agent " + " ".join(args), label, filename, stdin_text)
 
 
 def run_shell_capture(argv: list[str], command_display: str, label: str, filename: str) -> None:
@@ -118,13 +118,16 @@ def run_shell_capture(argv: list[str], command_display: str, label: str, filenam
     _capture(argv, command_display, label, filename)
 
 
-def _capture(argv: list[str], command_display: str, label: str, filename: str) -> None:
+def _capture(
+    argv: list[str], command_display: str, label: str, filename: str, stdin_text: str | None = None
+) -> None:
     result = subprocess.run(
         argv,
         cwd=REPO_ROOT,
         env=ENV,
         capture_output=True,
         text=True,
+        input=stdin_text,
     )
     combined = result.stdout + result.stderr
     body_html = CONVERTER.convert(combined, full=False)
@@ -213,6 +216,28 @@ def main() -> None:
         "09-report-markdown-output",
     )
     (REPO_ROOT / report_path).unlink(missing_ok=True)
+
+    run_capture(
+        ["demo", "--scenario", "deploy-regression", "--audit-log", audit_log, "--approval", "cli"],
+        "oncall-agent demo --scenario deploy-regression --approval cli  (typed: y)",
+        "10-demo-approval-cli-approved",
+        stdin_text="y\n",
+    )
+    run_capture(
+        ["demo", "--scenario", "deploy-regression", "--audit-log", audit_log, "--approval", "cli"],
+        "oncall-agent demo --scenario deploy-regression --approval cli  (typed: n)",
+        "11-demo-approval-cli-rejected",
+        stdin_text="n\n",
+    )
+
+    inbox_path = "docs-demo-decisions.jsonl"
+    (REPO_ROOT / inbox_path).unlink(missing_ok=True)
+    run_capture(
+        ["approve", "alert-abc123", "--approver", "alice", "--inbox", inbox_path],
+        "oncall-agent approve alert-abc123 --approver alice --inbox docs-demo-decisions.jsonl",
+        "12-approve-command",
+    )
+    (REPO_ROOT / inbox_path).unlink(missing_ok=True)
 
     (REPO_ROOT / audit_log).unlink(missing_ok=True)
 
