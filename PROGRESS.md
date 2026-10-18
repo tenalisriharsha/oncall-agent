@@ -162,10 +162,42 @@ exists — same pattern Phase 3 used for re-planning.
   - New `Settings` fields `slack_webhook_url`/`slack_decision_inbox_path`
   - Full test suite (185 tests, 99% statement coverage)
 
-- [ ] **Phase 5 — Incident simulator**
-  - chaos-kit-based fault injection
-  - 5-6 scenario definitions (bad deploy, OOM, dependency outage, network partition, disk pressure, config drift)
-  - Scenario runner that fires alerts against injected faults and lets the agent investigate
+- [x] **Phase 5 — Incident simulator** (Night 5)
+  - `simulator/faults.py`: `FaultType` (one per runbook — `BAD_DEPLOY`,
+    `OOM_CRASH_LOOP`, `DEPENDENCY_OUTAGE`, `NETWORK_PARTITION`,
+    `DISK_PRESSURE`, `CONFIG_DRIFT`), `FAULT_PROFILES` (the canned
+    ground-truth evidence each fault makes the fake tools return), and
+    `inject_fault()` — builds a fresh `ToolRegistry` wired to that
+    evidence. Hand-rolled rather than built on chaos-kit or any external
+    chaos-engineering tool: checked what chaos-kit actually offers before
+    starting, and since every existing demo/test already runs against
+    canned tool evidence (`tools/fakes.py`) and nothing here needs a live
+    cluster to inject a fault into, a dependency stayed unnecessary —
+    `FAULT_PROFILES` just describes what a live cluster's tools would
+    have reported if that fault were real
+  - `simulator/scenarios.py`: `Scenario` (alert + fault type + runbook +
+    a ground-truth note) and `SCENARIOS` — six incidents, one per
+    runbook in `runbooks/`
+  - `simulator/runner.py`: `run_scenario()`/`run_all_scenarios()` — build
+    an `Alert` from a `Scenario`, inject its fault, and call
+    `respond_to_incident()` (Phase 4) completely unchanged, with an
+    `AutoApprovalGate` standing in for a human so a whole suite runs
+    unattended. Each `ScenarioRun` carries the full `IncidentResponse`
+    plus its audit trail (`events`) — exactly the shape a Phase 6
+    scorecard needs (steps taken, revisions, whether it acted)
+  - CLI: `oncall-agent simulate list` / `simulate run <name>` /
+    `simulate run-all`
+  - Of the six scenarios, two are diagnosed precisely by the existing
+    scripted policy (bad deploy -> `ROLLBACK`, OOM crash loop ->
+    `SCALE`); the other four (dependency outage, network partition, disk
+    pressure, config drift) all show no recent deploy and no OOM signal
+    — the only failure shape the policy can currently tell apart from
+    "deploy caused it" — so all four escalate, correctly for the
+    dependency outage and as a safe-but-imprecise fallback for the other
+    three. That gap is intentional, documented in each scenario's
+    `notes` field, and exactly what Phase 6's scorecard should be able
+    to measure rather than paper over
+  - Full test suite (200 tests, 99% statement coverage)
 
 - [ ] **Phase 6 — Scorecard & polish**
   - Root-cause accuracy, steps taken, and cost per scenario across the simulator
@@ -174,43 +206,57 @@ exists — same pattern Phase 3 used for re-planning.
 
 ## Where to resume
 
-**Next session: start Phase 5 — incident simulator.** This needs a
-fault-injection mechanism (chaos-kit or a hand-rolled equivalent — worth
-checking what chaos-kit actually gives you before committing to the
-dependency, since the whole rest of this project has stayed
-dependency-light on purpose) and 5-6 scenario definitions (bad deploy,
-OOM, dependency outage, network partition, disk pressure, config drift
-— the `runbooks/` corpus already has one markdown runbook per scenario
-from Phase 2, which is a reasonable source of truth for what each
-scenario should actually inject). The scenario runner fires an `Alert`
-against the injected fault and lets `respond_to_incident()` (Phase 4)
-investigate and act on it end to end, auto-approving
-(`AutoApprovalGate`) so the simulator can run unattended.
+**Next session: start Phase 6 — scorecard & polish**, the last planned
+phase. `simulator/runner.py`'s `ScenarioRun` already carries exactly
+what a scorecard needs per scenario: the full `IncidentResponse`
+(diagnosis, approval, action result) and `events` (the complete audit
+trail — count `HYPOTHESIS_FORMED`/`HYPOTHESIS_REVISED`/`TOOL_CALL`
+events for "steps taken"). What's missing is the scoring layer itself:
+for each `Scenario`, a ground-truth label to compare the diagnosis
+against. `Scenario` currently only carries a human-readable `notes`
+string explaining the expected outcome informally — Phase 6 should add
+a machine-comparable field (e.g. an expected `ActionType`, or an
+expected `Hypothesis.category`) so a scorecard can compute root-cause
+accuracy automatically rather than requiring a human to read `notes`.
+Six scenarios is a small enough sample that the "cost per scenario"
+metric mentioned in the original plan should probably mean something
+concrete and simple — e.g. step count or wall-clock time, since the
+scripted policy has no token cost and `OllamaProvider`'s would need a
+real local model running to measure honestly (see below).
+
+`run_all_scenarios()` already makes a same-provider comparison trivial
+(`provider=` is a constructor arg); a scorecard comparing the scripted
+policy against `OllamaProvider` is mostly a matter of running the suite
+twice and diffing the results — contingent on a local Ollama install
+being available to develop against (see the note below, carried over
+from Phase 3/4: still untested against a real server).
+
+Three of the six simulator scenarios (`dependency-outage`,
+`network-partition`, `config-drift`) are currently indistinguishable to
+the scripted policy and a fourth (`disk-pressure`) is diagnosed
+incorrectly as a generic dependency failure — see `simulator/faults.py`
+and each `Scenario.notes` for why. The scorecard built in Phase 6 is
+exactly what should *surface* that gap numerically (e.g. "2/6 exact,
+1/6 correct-by-coincidence, 3/6 safe-but-wrong") rather than silently
+fixing the scripted policy to get a better score — whether to also
+close that gap (giving `disk_pressure`/`network_partition`/
+`config_drift` their own `Hypothesis.category` and a dedicated tool
+signal to detect them, following the same pattern Phase 3 used for
+`deploy_regression`/`resource_exhaustion`/`dependency_failure`) is a
+call worth making once the scorecard shows exactly how much it would
+move the number.
 
 The real Phase 2 tools (`tools/prometheus.py`, `tools/kubectl.py`,
 `tools/runbooks.py`, `tools/deploys.py`) are still only reachable
 standalone via `oncall-agent tools <name>` — not yet wired into
-`run_investigation`/the `demo` command, since `demo` needs
-deterministic, canned evidence for reproducible scenarios and
-screenshots. The simulator is exactly the place this finally matters:
-each scenario should inject a fault into *real* state (a local
-Prometheus, a kind/minikube cluster, or fakes dressed up to look like
-them) and register the real tools into a `ToolRegistry`, not the fakes
-`demo` uses. Phase 4's `ActionRegistry.kubectl(...)` (real, kubectl-
-backed executors) is already built for this and currently unused
-outside its own tests — the simulator is its first real caller.
-
-The scripted policy's re-planning (Phase 3) only revises once, and only
-when pod health shows *zero* signal at all (no restarts, no OOM) — a
-deliberately narrow trigger chosen so every Phase 1/2 test fixture
-(which builds `Hypothesis` objects without a `category`) stays
-untouched. The same pattern — tag hypotheses with `category`, check
-`current_hypothesis(...)` before acting on one — is the way to add more
-contradiction checks as the simulator's scenarios exercise paths the
-scripted policy doesn't handle well yet (e.g. network partition and
-config drift have no dedicated category today; they'll fall through to
-the generic "no deploy, no OOM -> escalate" branch, which may or may not
-be the right call once there's a scenario actually testing it).
+`run_investigation`, the `demo` command, or the simulator, all three of
+which still run on deterministic fake/canned evidence by design
+(reproducible scenarios, screenshots, and CI). Phase 4's
+`ActionRegistry.kubectl(...)` (real, kubectl-backed executors) is
+likewise still built but unused outside its own tests. Wiring either
+of these up to a live cluster/Prometheus remains future work, not
+required for Phase 6's scorecard, which only needs the simulator's
+existing fault-injected evidence to produce a meaningful comparison.
 
 `SlackApprovalGate` (Phase 4) is tested only against a mocked
 `requests.post` and a `SlackDecisionInbox` file — there is no real
@@ -230,7 +276,8 @@ compares to the scripted policy's canned decision tree — the prompt in
 No integration tests against a live Prometheus/cluster exist yet
 (the `integration` pytest marker is registered in `pyproject.toml` but
 unused) — add them if/when a live cluster or Prometheus becomes
-available to test against; they should stay skipped by default. Phase 5
-is the first phase where that marker is likely to actually get used.
+available to test against; they should stay skipped by default. The
+Phase 5 simulator still runs on fault-injected fakes rather than a live
+cluster (see above), so that marker remains unused for now too.
 
 STATUS: IN_PROGRESS

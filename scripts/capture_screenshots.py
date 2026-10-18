@@ -241,6 +241,30 @@ def main() -> None:
 
     (REPO_ROOT / audit_log).unlink(missing_ok=True)
 
+    sim_log = "docs-simulator-audit.jsonl"
+    (REPO_ROOT / sim_log).unlink(missing_ok=True)
+    run_capture(
+        ["simulate", "list"],
+        "oncall-agent simulate list",
+        "13-simulate-list",
+    )
+    run_capture(
+        ["simulate", "run", "bad-deploy", "--audit-log", sim_log],
+        "oncall-agent simulate run bad-deploy",
+        "14-simulate-run-bad-deploy",
+    )
+    run_capture(
+        ["simulate", "run", "network-partition", "--audit-log", sim_log],
+        "oncall-agent simulate run network-partition",
+        "15-simulate-run-network-partition",
+    )
+    run_capture(
+        ["simulate", "run-all", "--audit-log", sim_log],
+        "oncall-agent simulate run-all",
+        "16-simulate-run-all",
+    )
+    (REPO_ROOT / sim_log).unlink(missing_ok=True)
+
 
 if __name__ == "__main__":
     main()

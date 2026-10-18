@@ -13,7 +13,7 @@ This project is being built in public, one night at a time. See
 [`PROGRESS.md`](PROGRESS.md) for the full architecture, the phased build
 plan, and exactly where work left off.
 
-**Current phase:** Phases 1–4 are complete — domain models, an
+**Current phase:** Phases 1–5 are complete — domain models, an
 append-only audit trail, a pluggable LLM provider interface with a
 deterministic scripted policy, the investigate → hypothesize →
 diagnose loop, real Prometheus/kubectl/runbook/deploy-history clients
@@ -21,8 +21,10 @@ alongside the original fakes, multi-hypothesis ranking with
 contradiction-triggered re-planning, an optional local-model provider
 (Ollama), structured diagnosis report export (Markdown/JSON), a human
 approval gate (CLI prompt and Slack) in front of every state-changing
-action, action executors that only run once a human has said yes, and
-a CLI, all backed by a full test suite.
+action, action executors that only run once a human has said yes, an
+incident simulator that fires six fault-injected scenarios through the
+full investigate → approve → act loop unattended, and a CLI, all
+backed by a full test suite.
 
 ## Preview
 
@@ -77,6 +79,22 @@ All screenshots below are real terminal output from the commands shown
 
 ![Recording a Slack-style approval decision](docs/screenshots/12-approve-command.png)
 
+**`oncall-agent simulate list`** — the Phase 5 incident simulator's six fault-injected scenarios, one per runbook:
+
+![Simulator scenario list](docs/screenshots/13-simulate-list.png)
+
+**`oncall-agent simulate run bad-deploy`** — the simulator fires a fault-injected alert through the full investigate → approve → act loop, auto-approved so it runs unattended:
+
+![Simulator run: bad deploy, rolled back](docs/screenshots/14-simulate-run-bad-deploy.png)
+
+**`oncall-agent simulate run network-partition`** — a scenario the scripted policy can't tell apart from a dependency outage yet, so it escalates with the same generic diagnosis; the scenario's own notes call out the gap:
+
+![Simulator run: network partition, escalated as a generic dependency failure](docs/screenshots/15-simulate-run-network-partition.png)
+
+**`oncall-agent simulate run-all`** — all six scenarios in one pass: two precise diagnoses (rollback, scale) and four escalations, one of them taking a visibly different fallback path (disk-pressure) than the other three:
+
+![Simulator run-all summary across all six scenarios](docs/screenshots/16-simulate-run-all.png)
+
 ## Why this exists
 
 Real incident response is a loop: look at evidence, form a theory, look
@@ -127,7 +145,11 @@ src/oncall_agent/
 │   ├── kubectl.py        KubectlClient — get/describe/logs only, never a write
 │   ├── deploys.py        DeployHistoryStore/Tool — append-only deploy ledger
 │   └── runbooks.py       RunbookSearchTool — keyword search over runbooks/*.md
-└── cli.py               click CLI: version, config, demo, audit, approve, tools
+├── simulator/
+│   ├── faults.py          FaultType, FAULT_PROFILES, inject_fault — canned fault evidence
+│   ├── scenarios.py        Scenario, SCENARIOS — six incidents, one per runbook
+│   └── runner.py           run_scenario / run_all_scenarios — fires respond_to_incident unattended
+└── cli.py               click CLI: version, config, demo, audit, approve, simulate, tools
 ```
 
 `tools/` ships two implementations of the same `Tool` interface: the
@@ -155,8 +177,32 @@ Nothing in `run_investigation` itself knows an approval gate exists;
 `respond_to_incident` is a pure wrapper, same as every other
 provider/tool swap in this codebase.
 
-Full phase-by-phase plan (the chaos-kit incident simulator, the
-scorecard) is in [`PROGRESS.md`](PROGRESS.md).
+`simulator/` adds a layer *next to* the loop, not inside it:
+`run_scenario` builds an `Alert` from a `Scenario`, injects a
+`FaultType`'s canned evidence into a fresh `ToolRegistry`
+(`inject_fault`), and calls `respond_to_incident` completely unchanged,
+with an `AutoApprovalGate` standing in for a human so a whole scenario
+suite can run unattended. Six scenarios ship, one per runbook in
+`runbooks/`. Two of them the scripted policy diagnoses precisely (a
+deploy regression it rolls back, an OOM crash loop it scales up); the
+other four (dependency outage, network partition, disk pressure,
+config drift) all show no recent deploy and no OOM signal, which is
+the only failure shape the policy can currently tell apart from "deploy
+caused it" — so it escalates all four, correctly for the dependency
+outage and as a safe-but-imprecise fallback for the other three. That
+gap is deliberate and documented in each `Scenario.notes` field: it's
+exactly what a future scorecard (Phase 6) should be able to measure.
+
+Fault injection here is hand-rolled rather than built on an external
+chaos-engineering tool: every existing demo and test in this project
+already runs against canned tool evidence (`tools/fakes.py`), the
+project has stayed dependency-light on purpose since Phase 1, and nothing
+here needs a live cluster to inject a fault into — `FAULT_PROFILES` just
+describes, per fault, what a live cluster's tools would have reported if
+that fault were real.
+
+Full phase-by-phase plan (the scorecard, provider comparison) is in
+[`PROGRESS.md`](PROGRESS.md).
 
 ## Installation
 
@@ -197,6 +243,12 @@ oncall-agent audit
 # record a Slack-style approval decision (the human side of SlackApprovalGate's inbox)
 oncall-agent approve alert-abc123 --approver alice
 oncall-agent approve alert-abc123 --approver alice --reject --reason "too risky, escalate instead"
+
+# fire the incident simulator's fault-injected scenarios, unattended
+oncall-agent simulate list
+oncall-agent simulate run bad-deploy
+oncall-agent simulate run network-partition
+oncall-agent simulate run-all
 
 # call a real read-only tool directly, outside an investigation
 oncall-agent tools query-prometheus 'up{job="checkout-service"}' --url http://localhost:9090
@@ -262,13 +314,23 @@ decision. `oncall-agent approve` is the manual stand-in for the Slack
 button click a real deployment would wire up via the Events API: it
 appends the same decision shape to the same inbox.
 
+`simulate list` shows all six scenarios and the fault each one
+injects; `simulate run <name>` fires one through the full
+investigate → approve → act loop (auto-approved, acting through the
+same dry-run `ActionRegistry.noop()` the `demo` command uses) and
+prints the same diagnosis/approval/action panels `demo` does, plus the
+scenario's ground-truth note; `simulate run-all` fires all six and
+prints a one-line summary of each outcome. Every run appends to its
+own audit log (`.oncall-agent/simulator.jsonl` by default, overridable
+with `--audit-log`), inspectable afterwards with `oncall-agent audit`.
+
 ## Testing
 
 ```bash
 pytest -q --cov=oncall_agent
 ```
 
-185 tests, 99% statement coverage, no network access or API key
+200 tests, 99% statement coverage, no network access or API key
 required — this is also what CI runs. The real Prometheus/kubectl
 clients, the optional Ollama provider, and the Slack approval gate are
 all tested by mocking the HTTP/subprocess boundary, so the suite never
