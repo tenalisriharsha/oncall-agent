@@ -23,6 +23,8 @@ from .llm import get_provider
 from .models import Alert, ApprovalDecision, ApprovalStatus, Severity
 from .report import REPORT_FORMATS, export_report
 from .response import respond_to_incident
+from .simulator import SCENARIOS as SIM_SCENARIOS
+from .simulator import ScenarioRun, get_scenario, run_scenario
 from .tools import FakePodStatusTool, FakeRecentDeploysTool, ToolRegistry
 from .tools.deploys import DeployHistoryStore, DeployHistoryTool, DeployRecord
 from .tools.kubectl import KubectlClient, KubectlError, KubectlLogsTool, KubectlPodStatusTool
@@ -202,6 +204,15 @@ def demo(
         approval = response.approval
         action_result = response.action_result
 
+    _print_diagnosis(diagnosis, approval, action_result)
+    console.print(f"[dim]Audit trail written to {log_path}[/dim]")
+
+    if report_path:
+        written = export_report(alert, diagnosis, report_path, fmt=report_format)
+        console.print(f"[dim]Diagnosis report written to {written}[/dim]")
+
+
+def _print_diagnosis(diagnosis, approval, action_result) -> None:
     body = (
         f"[bold]Root cause:[/bold] {diagnosis.root_cause}\n"
         f"[bold]Confidence:[/bold] {diagnosis.confidence:.2f}\n"
@@ -231,12 +242,6 @@ def demo(
             f"[bold]Output:[/bold] {action_result.output}"
         )
         console.print(Panel(action_body, title="Action executed", border_style=style))
-
-    console.print(f"[dim]Audit trail written to {log_path}[/dim]")
-
-    if report_path:
-        written = export_report(alert, diagnosis, report_path, fmt=report_format)
-        console.print(f"[dim]Diagnosis report written to {written}[/dim]")
 
 
 @main.command(name="audit")
@@ -417,6 +422,82 @@ def tools_search_runbooks(query: str, top_k: int) -> None:
         console.print(
             Panel(match["excerpt"], title=f"{match['runbook']} (score={match['score']})")
         )
+
+
+@main.group()
+def simulate() -> None:
+    """Fire the incident simulator's fault-injected scenarios at the agent."""
+
+
+@simulate.command("list")
+def simulate_list() -> None:
+    """List the simulator's scenarios and the fault each one injects."""
+    table = Table(title="Incident simulator scenarios")
+    table.add_column("name", no_wrap=True)
+    table.add_column("severity")
+    table.add_column("runbook", no_wrap=True)
+    for scenario in SIM_SCENARIOS:
+        table.add_row(scenario.name, scenario.severity.value, scenario.runbook)
+    console.print(table)
+
+
+@simulate.command("run")
+@click.argument("scenario_name")
+@click.option(
+    "--audit-log",
+    "audit_log_path",
+    default=None,
+    help="Where to append the audit trail. Defaults to .oncall-agent/simulator.jsonl.",
+)
+def simulate_run(scenario_name: str, audit_log_path: str | None) -> None:
+    """Fire one scenario's injected fault through the full agent + approval loop."""
+    try:
+        scenario = get_scenario(scenario_name)
+    except KeyError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise SystemExit(1)
+
+    run = run_scenario(scenario, audit_log_path=audit_log_path)
+    console.print(
+        Panel(
+            f"[bold]{run.alert.title}[/bold]\n{run.alert.description}\n"
+            f"service={run.alert.service} severity={run.alert.severity.value}\n"
+            f"[dim]fault injected: {scenario.fault_type.value}[/dim]",
+            title=f"Scenario '{scenario.name}' — Alert {run.alert.id}",
+        )
+    )
+    _print_diagnosis(run.response.diagnosis, run.response.approval, run.response.action_result)
+    console.print(f"[dim]{scenario.notes}[/dim]")
+
+
+@simulate.command("run-all")
+@click.option(
+    "--audit-log",
+    "audit_log_path",
+    default=None,
+    help="Where to append the audit trail. Defaults to .oncall-agent/simulator.jsonl.",
+)
+def simulate_run_all(audit_log_path: str | None) -> None:
+    """Fire every scenario and print a one-line summary of each outcome."""
+    table = Table(title="Incident simulator results")
+    table.add_column("scenario", no_wrap=True)
+    table.add_column("action", no_wrap=True)
+    table.add_column("confidence", no_wrap=True)
+    table.add_column("root cause", no_wrap=True)
+    for scenario in SIM_SCENARIOS:
+        run: ScenarioRun = run_scenario(scenario, audit_log_path=audit_log_path)
+        diagnosis = run.response.diagnosis
+        table.add_row(
+            scenario.name,
+            diagnosis.action.value if diagnosis.action else "(none)",
+            f"{diagnosis.confidence:.2f}",
+            _truncate(diagnosis.root_cause, 40),
+        )
+    console.print(table)
+
+
+def _truncate(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 if __name__ == "__main__":
