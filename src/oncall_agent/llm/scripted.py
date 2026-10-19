@@ -166,6 +166,7 @@ class ScriptedPolicyProvider(LLMProvider):
                     "dependency health and latency."
                 ),
                 requires_approval=True,
+                category=CATEGORY_DEPENDENCY_FAILURE,
                 hypotheses_considered=ranked,
                 action=ActionType.ESCALATE,
                 action_arguments={"service": request.alert.service},
@@ -187,6 +188,7 @@ class ScriptedPolicyProvider(LLMProvider):
                 ],
                 proposed_fix=f"Roll back {request.alert.service} to {previous_version}.",
                 requires_approval=True,
+                category=CATEGORY_DEPLOY_REGRESSION,
                 hypotheses_considered=ranked,
                 action=ActionType.ROLLBACK,
                 action_arguments={"service": request.alert.service, "to_version": previous_version},
@@ -203,6 +205,7 @@ class ScriptedPolicyProvider(LLMProvider):
                     f"Increase memory limits and scale up {request.alert.service} replicas."
                 ),
                 requires_approval=True,
+                category=CATEGORY_RESOURCE_EXHAUSTION,
                 hypotheses_considered=ranked,
                 action=ActionType.SCALE,
                 action_arguments={"service": request.alert.service, "replicas": SCALE_UP_REPLICAS},
@@ -217,6 +220,7 @@ class ScriptedPolicyProvider(LLMProvider):
             evidence=["No recent deploy.", "No OOM signal in pod status."],
             proposed_fix=f"Escalate {request.alert.service} to a human on-call engineer.",
             requires_approval=True,
+            category=CATEGORY_DEPENDENCY_FAILURE,
             hypotheses_considered=ranked,
             action=ActionType.ESCALATE,
             action_arguments={"service": request.alert.service},

@@ -263,6 +263,16 @@ def main() -> None:
         "oncall-agent simulate run-all",
         "16-simulate-run-all",
     )
+    run_capture(
+        ["simulate", "scorecard", "--audit-log", sim_log],
+        "oncall-agent simulate scorecard",
+        "17-simulate-scorecard",
+    )
+    run_capture(
+        ["simulate", "compare", "--audit-log", sim_log],
+        "oncall-agent simulate compare",
+        "18-simulate-compare",
+    )
     (REPO_ROOT / sim_log).unlink(missing_ok=True)
 
 

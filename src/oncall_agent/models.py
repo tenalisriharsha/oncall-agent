@@ -91,6 +91,11 @@ class Diagnosis(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     proposed_fix: str
     requires_approval: bool = True
+    # The category of the hypothesis this diagnosis actually concluded from,
+    # mirroring Hypothesis.category so a scorecard can compare root-cause
+    # accuracy without re-parsing `root_cause` text. `None` for diagnoses a
+    # policy didn't tag (e.g. a raw LLMProvider response that skips it).
+    category: str | None = None
     hypotheses_considered: list[Hypothesis] = Field(default_factory=list)
     # The machine-actionable shape of `proposed_fix`, if one exists. `None`
     # means the fix has no automated executor (e.g. a vague escalation) and

@@ -12,12 +12,31 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from ..models import Severity
+from ..models import ActionType, Severity
 from .faults import FaultType
+
+# Ground-truth root-cause labels for scoring. The first three reuse the
+# scripted policy's own category constants (llm/scripted.py) since those
+# faults are what the policy is actually built to recognize; the last three
+# are true causes the policy has no dedicated signal for yet (see
+# `faults.py` and each scenario's `notes`), so a scorecard can show the gap
+# numerically instead of the policy silently mislabeling them as a match.
+EXPECTED_CATEGORY_DEPLOY_REGRESSION = "deploy_regression"
+EXPECTED_CATEGORY_RESOURCE_EXHAUSTION = "resource_exhaustion"
+EXPECTED_CATEGORY_DEPENDENCY_FAILURE = "dependency_failure"
+EXPECTED_CATEGORY_NETWORK_PARTITION = "network_partition"
+EXPECTED_CATEGORY_DISK_PRESSURE = "disk_pressure"
+EXPECTED_CATEGORY_CONFIG_DRIFT = "config_drift"
 
 
 class Scenario(BaseModel):
-    """One incident the simulator can fire: an alert plus its true cause."""
+    """One incident the simulator can fire: an alert plus its true cause.
+
+    ``expected_category``/``expected_action`` are the ground truth a
+    scorecard compares the agent's actual diagnosis against — not
+    necessarily what the scripted policy can currently produce (see the
+    module docstring above for the three categories it can't yet detect).
+    """
 
     name: str
     fault_type: FaultType
@@ -27,6 +46,8 @@ class Scenario(BaseModel):
     severity: Severity
     runbook: str
     notes: str
+    expected_category: str
+    expected_action: ActionType
 
 
 SCENARIOS: list[Scenario] = [
@@ -39,6 +60,8 @@ SCENARIOS: list[Scenario] = [
         severity=Severity.HIGH,
         runbook="deploy-regression.md",
         notes="Deploy inside the regression window plus restarts: diagnosed precisely as a deploy regression, action ROLLBACK.",
+        expected_category=EXPECTED_CATEGORY_DEPLOY_REGRESSION,
+        expected_action=ActionType.ROLLBACK,
     ),
     Scenario(
         name="oom-crash-loop",
@@ -49,6 +72,8 @@ SCENARIOS: list[Scenario] = [
         severity=Severity.CRITICAL,
         runbook="oom-crash-loop.md",
         notes="No recent deploy, oom_killed=true: diagnosed precisely as resource exhaustion, action SCALE.",
+        expected_category=EXPECTED_CATEGORY_RESOURCE_EXHAUSTION,
+        expected_action=ActionType.SCALE,
     ),
     Scenario(
         name="dependency-outage",
@@ -59,6 +84,8 @@ SCENARIOS: list[Scenario] = [
         severity=Severity.HIGH,
         runbook="dependency-outage.md",
         notes="No deploy, healthy pods: the scripted policy revises and escalates as a dependency failure, which matches the true cause here.",
+        expected_category=EXPECTED_CATEGORY_DEPENDENCY_FAILURE,
+        expected_action=ActionType.ESCALATE,
     ),
     Scenario(
         name="network-partition",
@@ -73,6 +100,8 @@ SCENARIOS: list[Scenario] = [
             "policy escalates it as one too. The true cause is a network partition; the "
             "policy has no dedicated signal to tell the two apart yet."
         ),
+        expected_category=EXPECTED_CATEGORY_NETWORK_PARTITION,
+        expected_action=ActionType.ESCALATE,
     ),
     Scenario(
         name="disk-pressure",
@@ -87,6 +116,8 @@ SCENARIOS: list[Scenario] = [
             "recognizes, so it falls through to a generic escalation. The true cause is "
             "node disk pressure, not a dependency failure."
         ),
+        expected_category=EXPECTED_CATEGORY_DISK_PRESSURE,
+        expected_action=ActionType.ESCALATE,
     ),
     Scenario(
         name="config-drift",
@@ -101,6 +132,8 @@ SCENARIOS: list[Scenario] = [
             "dependency failure. The true cause is configuration drift, which this tool "
             "surface can't see directly yet."
         ),
+        expected_category=EXPECTED_CATEGORY_CONFIG_DRIFT,
+        expected_action=ActionType.ESCALATE,
     ),
 ]
 

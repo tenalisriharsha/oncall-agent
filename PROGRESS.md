@@ -11,9 +11,9 @@ diagnosis plus a proposed fix.
 Every state-changing action (restart, rollback, scale) is blocked behind
 a human approval gate — CLI and Slack — and every step the agent takes
 is written to an append-only audit trail. The project ships with an
-incident simulator that uses chaos-kit to inject faults, and a scorecard
-that measures root-cause accuracy, steps taken, and cost per scenario
-across 5-6 scenarios.
+incident simulator that injects faults (hand-rolled, not chaos-kit — see
+Phase 5 below for why), and a scorecard that measures root-cause
+accuracy, action accuracy, and steps taken across six scenarios.
 
 LLM access is a pluggable provider: a scripted, deterministic policy for
 tests and CI (no paid API key, no network access required), with
@@ -41,7 +41,15 @@ src/oncall_agent/
 │   ├── kubectl.py        KubectlClient — get/describe/logs only, refuses anything else
 │   ├── deploys.py        DeployHistoryStore/Tool — append-only deploy ledger
 │   └── runbooks.py       RunbookSearchTool — keyword search over runbooks/*.md
-└── cli.py               click CLI: version, config, demo, audit, tools
+├── approval.py           ApprovalGate — CLIApprovalGate, SlackApprovalGate, AutoApprovalGate
+├── actions.py            ActionExecutor — kubectl-backed and dry-run (Noop) executors
+├── response.py           respond_to_incident — investigation + approval gate + action execution
+├── simulator/
+│   ├── faults.py          FaultType, FAULT_PROFILES, inject_fault — canned fault evidence
+│   ├── scenarios.py        Scenario, SCENARIOS — six incidents, one per runbook, with ground truth
+│   ├── runner.py           run_scenario / run_all_scenarios — fires respond_to_incident unattended
+│   └── scorecard.py        score_run / build_scorecard — root-cause/action accuracy per provider
+└── cli.py               click CLI: version, config, demo, audit, approve, simulate, tools
 ```
 
 The investigation loop is provider- and tool-agnostic: it asks whatever
@@ -71,6 +79,30 @@ a dry-run `NoopActionExecutor` registry) via `execute_action()`, which
 refuses anything without an `APPROVED` decision and always logs the
 outcome. `run_investigation()` itself has zero awareness any of this
 exists — same pattern Phase 3 used for re-planning.
+
+Phase 5 added a layer *next to* the loop, not inside it:
+`simulator/runner.py`'s `run_scenario()` builds an `Alert` from a
+`Scenario`, injects a `FaultType`'s canned evidence into a fresh
+`ToolRegistry` (`simulator/faults.py`'s `inject_fault()`), and calls
+`respond_to_incident()` completely unchanged, with an
+`AutoApprovalGate` standing in for a human so a whole scenario suite
+can run unattended.
+
+Phase 6 added a comparison layer *next to* the simulator, not inside it:
+`simulator/scorecard.py`'s `score_run()` compares one `ScenarioRun`'s
+actual `Diagnosis.category`/`.action` against its `Scenario`'s
+`expected_category`/`expected_action` ground truth (new fields on both
+models — `Diagnosis.category` is tagged by the scripted policy on every
+branch of `_diagnose()`, mirroring what it already tagged on the leading
+hypothesis), and counts the audit trail's `TOOL_CALL`/
+`HYPOTHESIS_FORMED`/`HYPOTHESIS_REVISED` events as "steps taken."
+`build_scorecard()` aggregates a whole suite into root-cause accuracy,
+action accuracy, and step counts; `render_markdown()`/
+`render_comparison_markdown()` turn a `Scorecard` (or several, for a
+provider comparison) into a standalone document. None of this touches
+`run_investigation`, `respond_to_incident`, the scripted policy's control
+flow, or any existing scenario's evidence — same purely-additive,
+layer-on-top pattern every phase before it used.
 
 ## Phased build plan
 
@@ -199,85 +231,84 @@ exists — same pattern Phase 3 used for re-planning.
     to measure rather than paper over
   - Full test suite (200 tests, 99% statement coverage)
 
-- [ ] **Phase 6 — Scorecard & polish**
-  - Root-cause accuracy, steps taken, and cost per scenario across the simulator
-  - Comparison report across providers (scripted vs. local model)
-  - Final docs/README polish and packaging
+- [x] **Phase 6 — Scorecard & polish** (Night 6)
+  - `models.py`: `Diagnosis.category` — the category of the hypothesis a
+    diagnosis actually concluded from, mirroring `Hypothesis.category`.
+    Purely additive (`None` default); `ScriptedPolicyProvider._diagnose()`
+    now tags it on every branch, matching the category each branch's own
+    `root_cause` text already claimed (including the generic fallback
+    branch, which claims "downstream dependency failure" regardless of
+    whether the leading hypothesis was ever revised to that category —
+    tagging the diagnosis directly sidesteps that existing mismatch rather
+    than inheriting it)
+  - `simulator/scenarios.py`: every `Scenario` gained `expected_category`/
+    `expected_action` — ground-truth labels a scorecard compares the
+    actual diagnosis against. Three reuse the scripted policy's own
+    category constants (the faults it's built to recognize); the other
+    three (`network_partition`, `disk_pressure`, `config_drift`) are true
+    causes the policy has no dedicated signal for yet, so the scorecard
+    can show the gap numerically instead of the policy's generic fallback
+    silently "passing"
+  - `simulator/scorecard.py`: `score_run()` (one scenario vs. its ground
+    truth: category match, action match, steps taken, revisions),
+    `build_scorecard()` (aggregates a suite: root-cause accuracy, action
+    accuracy, total/average steps), `render_markdown()`/
+    `render_comparison_markdown()` (standalone report, and a provider vs.
+    provider comparison)
+  - CLI: `oncall-agent simulate scorecard [--provider scripted|ollama]
+    [--report PATH] [--audit-log PATH]` and `oncall-agent simulate
+    compare [--report PATH] [--audit-log PATH]` — the latter always
+    scores the scripted policy and also scores `OllamaProvider` if a
+    local Ollama server answers at the configured URL, falling back to
+    scripted-only with a printed warning (not a crash) if it doesn't
+  - Measured result against the scripted policy today: **50% root-cause
+    accuracy (3/6)** but **100% action accuracy (6/6)** — it never
+    proposes a wrong destructive action, even on the three scenarios it
+    mislabels, because the fallback for "no dedicated signal" is always
+    `ESCALATE`, never a guess. This is exactly the gap Phase 5's notes
+    predicted a scorecard should surface numerically
+  - "Cost per scenario" is measured as step count (tool calls + hypotheses
+    formed/revised from the audit trail), not token cost — the scripted
+    policy has no token cost, and `OllamaProvider`'s would need a real
+    local model running to measure honestly (still untested against one;
+    see below)
+  - Full test suite (216 tests, 99% statement coverage)
 
 ## Where to resume
 
-**Next session: start Phase 6 — scorecard & polish**, the last planned
-phase. `simulator/runner.py`'s `ScenarioRun` already carries exactly
-what a scorecard needs per scenario: the full `IncidentResponse`
-(diagnosis, approval, action result) and `events` (the complete audit
-trail — count `HYPOTHESIS_FORMED`/`HYPOTHESIS_REVISED`/`TOOL_CALL`
-events for "steps taken"). What's missing is the scoring layer itself:
-for each `Scenario`, a ground-truth label to compare the diagnosis
-against. `Scenario` currently only carries a human-readable `notes`
-string explaining the expected outcome informally — Phase 6 should add
-a machine-comparable field (e.g. an expected `ActionType`, or an
-expected `Hypothesis.category`) so a scorecard can compute root-cause
-accuracy automatically rather than requiring a human to read `notes`.
-Six scenarios is a small enough sample that the "cost per scenario"
-metric mentioned in the original plan should probably mean something
-concrete and simple — e.g. step count or wall-clock time, since the
-scripted policy has no token cost and `OllamaProvider`'s would need a
-real local model running to measure honestly (see below).
+All six planned phases are complete. There is no next phase queued;
+everything below is optional future work, not a blocker for this
+project's stated scope (see `DAILY_REPORT.md` for the full summary and
+known limitations). If picked back up, the most natural next steps, in
+rough order of value, are:
 
-`run_all_scenarios()` already makes a same-provider comparison trivial
-(`provider=` is a constructor arg); a scorecard comparing the scripted
-policy against `OllamaProvider` is mostly a matter of running the suite
-twice and diffing the results — contingent on a local Ollama install
-being available to develop against (see the note below, carried over
-from Phase 3/4: still untested against a real server).
+1. Close the root-cause gap the Phase 6 scorecard measures: give
+   `disk_pressure`/`network_partition`/`config_drift` their own
+   `Hypothesis.category` and a dedicated tool signal to detect them,
+   following the same pattern Phase 3 used for
+   `deploy_regression`/`resource_exhaustion`/`dependency_failure`. The
+   scorecard now shows exactly how much this would move the number
+   (50% → up to 100% root-cause accuracy) without needing to guess.
+2. Wire the real Phase 2 tools (`tools/prometheus.py`,
+   `tools/kubectl.py`, `tools/runbooks.py`, `tools/deploys.py`) and
+   Phase 4's `ActionRegistry.kubectl(...)` into a "live" investigation
+   mode, as an alternative to `demo`/`simulate`'s fake/canned evidence.
+   Both are already built and tested standalone (`oncall-agent tools
+   <name>`); nothing about the `Tool`/`ActionExecutor` interfaces needs
+   to change for this, only a new entry point that registers them
+   instead of the fakes.
+3. Smoke-test `OllamaProvider` against a real local Ollama server
+   (`ONCALL_AGENT_LLM_PROVIDER=ollama oncall-agent demo`, or
+   `oncall-agent simulate compare` once one is running) — it has only
+   ever been exercised against a mocked HTTP boundary, so the prompt in
+   `llm/ollama.py` has had no real-model tuning.
+4. Wire a real Slack Events API endpoint behind `oncall-agent approve`
+   (currently a manual CLI stand-in for the button click) if this ever
+   needs to run against an actual Slack workspace instead of the local
+   `SlackDecisionInbox` file.
+5. Add integration tests against a live Prometheus/cluster (the
+   `integration` pytest marker is registered in `pyproject.toml` but
+   unused) if/when one becomes available to test against; they should
+   stay skipped by default.
 
-Three of the six simulator scenarios (`dependency-outage`,
-`network-partition`, `config-drift`) are currently indistinguishable to
-the scripted policy and a fourth (`disk-pressure`) is diagnosed
-incorrectly as a generic dependency failure — see `simulator/faults.py`
-and each `Scenario.notes` for why. The scorecard built in Phase 6 is
-exactly what should *surface* that gap numerically (e.g. "2/6 exact,
-1/6 correct-by-coincidence, 3/6 safe-but-wrong") rather than silently
-fixing the scripted policy to get a better score — whether to also
-close that gap (giving `disk_pressure`/`network_partition`/
-`config_drift` their own `Hypothesis.category` and a dedicated tool
-signal to detect them, following the same pattern Phase 3 used for
-`deploy_regression`/`resource_exhaustion`/`dependency_failure`) is a
-call worth making once the scorecard shows exactly how much it would
-move the number.
-
-The real Phase 2 tools (`tools/prometheus.py`, `tools/kubectl.py`,
-`tools/runbooks.py`, `tools/deploys.py`) are still only reachable
-standalone via `oncall-agent tools <name>` — not yet wired into
-`run_investigation`, the `demo` command, or the simulator, all three of
-which still run on deterministic fake/canned evidence by design
-(reproducible scenarios, screenshots, and CI). Phase 4's
-`ActionRegistry.kubectl(...)` (real, kubectl-backed executors) is
-likewise still built but unused outside its own tests. Wiring either
-of these up to a live cluster/Prometheus remains future work, not
-required for Phase 6's scorecard, which only needs the simulator's
-existing fault-injected evidence to produce a meaningful comparison.
-
-`SlackApprovalGate` (Phase 4) is tested only against a mocked
-`requests.post` and a `SlackDecisionInbox` file — there is no real
-Slack Events API endpoint behind `oncall-agent approve`, by design (that
-would need a hosted webhook receiver, out of scope for a local-only
-project). If a real Slack app ever gets wired up, it should append to
-the same `SlackDecisionInbox` shape `approve` already writes.
-
-`OllamaProvider` (Phase 3) is untested against a real Ollama server —
-only against a mocked HTTP boundary, same pattern as the Prometheus/
-kubectl clients. If a local Ollama install becomes available to
-develop against, worth a manual smoke test (`ONCALL_AGENT_LLM_PROVIDER=
-ollama oncall-agent demo`) to see how a real model's output quality
-compares to the scripted policy's canned decision tree — the prompt in
-`llm/ollama.py` has had no real-model tuning yet.
-
-No integration tests against a live Prometheus/cluster exist yet
-(the `integration` pytest marker is registered in `pyproject.toml` but
-unused) — add them if/when a live cluster or Prometheus becomes
-available to test against; they should stay skipped by default. The
-Phase 5 simulator still runs on fault-injected fakes rather than a live
-cluster (see above), so that marker remains unused for now too.
-
-STATUS: IN_PROGRESS
+STATUS: COMPLETE

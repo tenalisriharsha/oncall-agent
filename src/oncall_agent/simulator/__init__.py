@@ -13,6 +13,14 @@ from __future__ import annotations
 from .faults import FaultType, inject_fault
 from .runner import ScenarioRun, run_all_scenarios, run_scenario
 from .scenarios import SCENARIOS, Scenario, get_scenario
+from .scorecard import (
+    Scorecard,
+    ScenarioScore,
+    build_scorecard,
+    render_comparison_markdown,
+    render_markdown as render_scorecard_markdown,
+    score_run,
+)
 
 __all__ = [
     "FaultType",
@@ -23,4 +31,10 @@ __all__ = [
     "ScenarioRun",
     "run_scenario",
     "run_all_scenarios",
+    "Scorecard",
+    "ScenarioScore",
+    "build_scorecard",
+    "score_run",
+    "render_scorecard_markdown",
+    "render_comparison_markdown",
 ]

@@ -8,6 +8,8 @@ investigation left behind.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import click
 from rich.console import Console
 from rich.panel import Panel
@@ -20,11 +22,21 @@ from .audit import AuditTrail
 from .config import Settings
 from .investigation import run_investigation
 from .llm import get_provider
+from .llm.ollama import OllamaProviderError
 from .models import Alert, ApprovalDecision, ApprovalStatus, Severity
 from .report import REPORT_FORMATS, export_report
 from .response import respond_to_incident
 from .simulator import SCENARIOS as SIM_SCENARIOS
-from .simulator import ScenarioRun, get_scenario, run_scenario
+from .simulator import (
+    Scorecard,
+    ScenarioRun,
+    build_scorecard,
+    get_scenario,
+    render_comparison_markdown,
+    render_scorecard_markdown,
+    run_all_scenarios,
+    run_scenario,
+)
 from .tools import FakePodStatusTool, FakeRecentDeploysTool, ToolRegistry
 from .tools.deploys import DeployHistoryStore, DeployHistoryTool, DeployRecord
 from .tools.kubectl import KubectlClient, KubectlError, KubectlLogsTool, KubectlPodStatusTool
@@ -498,6 +510,137 @@ def simulate_run_all(audit_log_path: str | None) -> None:
 
 def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+@simulate.command("scorecard")
+@click.option(
+    "--provider",
+    "provider_name",
+    type=click.Choice(["scripted", "ollama"]),
+    default="scripted",
+    show_default=True,
+    help="LLM provider to score every scenario against.",
+)
+@click.option(
+    "--report",
+    "report_path",
+    default=None,
+    help="If given, write the scorecard as Markdown to this path.",
+)
+@click.option(
+    "--audit-log",
+    "audit_log_path",
+    default=None,
+    help="Where to append the audit trail. Defaults to .oncall-agent/simulator.jsonl.",
+)
+def simulate_scorecard(provider_name: str, report_path: str | None, audit_log_path: str | None) -> None:
+    """Score every scenario's diagnosis against ground truth.
+
+    Reports root-cause accuracy (did the diagnosis's category match the
+    scenario's true cause), action accuracy (was the proposed action still
+    safe even when the cause was mislabeled), and steps taken per scenario.
+    """
+    settings = Settings.from_env()
+    provider = (
+        get_provider("ollama", base_url=settings.ollama_url, model=settings.ollama_model)
+        if provider_name == "ollama"
+        else get_provider("scripted")
+    )
+    try:
+        runs = run_all_scenarios(provider=provider, audit_log_path=audit_log_path)
+    except OllamaProviderError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise SystemExit(1)
+
+    scorecard = build_scorecard(runs, provider=provider_name)
+    _print_scorecard(scorecard)
+
+    if report_path:
+        Path(report_path).write_text(render_scorecard_markdown(scorecard), encoding="utf-8")
+        console.print(f"[dim]Scorecard written to {report_path}[/dim]")
+
+
+def _print_scorecard(scorecard: Scorecard) -> None:
+    table = Table(title=f"Incident simulator scorecard — provider: {scorecard.provider}")
+    table.add_column("scenario", no_wrap=True)
+    table.add_column("expected cause")
+    table.add_column("actual cause")
+    table.add_column("cause", justify="center")
+    table.add_column("expected action")
+    table.add_column("actual action")
+    table.add_column("action", justify="center")
+    table.add_column("steps", justify="right")
+    for score in scorecard.scores:
+        table.add_row(
+            score.scenario,
+            score.expected_category,
+            score.actual_category or "(none)",
+            "[green]match[/green]" if score.category_match else "[red]MISS[/red]",
+            score.expected_action.value,
+            score.actual_action.value if score.actual_action else "(none)",
+            "[green]match[/green]" if score.action_match else "[red]MISS[/red]",
+            str(score.steps),
+        )
+    console.print(table)
+    console.print(
+        f"[bold]Root-cause accuracy:[/bold] {scorecard.root_cause_accuracy:.0%}  "
+        f"[bold]Action accuracy:[/bold] {scorecard.action_accuracy:.0%}  "
+        f"[bold]Total steps:[/bold] {scorecard.total_steps}  "
+        f"[bold]Avg steps/scenario:[/bold] {scorecard.average_steps:.1f}"
+    )
+
+
+@simulate.command("compare")
+@click.option(
+    "--report",
+    "report_path",
+    default=None,
+    help="If given, write the comparison as Markdown to this path.",
+)
+@click.option(
+    "--audit-log",
+    "audit_log_path",
+    default=None,
+    help="Where to append the audit trail. Defaults to .oncall-agent/simulator.jsonl.",
+)
+def simulate_compare(report_path: str | None, audit_log_path: str | None) -> None:
+    """Compare the scripted policy against the optional Ollama provider.
+
+    Always scores the scripted policy. Also scores the Ollama provider if
+    a local Ollama server is reachable at the configured URL; otherwise
+    prints a warning and compares against the scripted policy alone.
+    """
+    settings = Settings.from_env()
+    scripted_runs = run_all_scenarios(provider=get_provider("scripted"), audit_log_path=audit_log_path)
+    scorecards = [build_scorecard(scripted_runs, provider="scripted")]
+
+    ollama_provider = get_provider("ollama", base_url=settings.ollama_url, model=settings.ollama_model)
+    try:
+        ollama_runs = run_all_scenarios(provider=ollama_provider, audit_log_path=audit_log_path)
+    except OllamaProviderError as exc:
+        console.print(f"[yellow]Ollama provider unavailable, comparing against scripted only: {exc}[/yellow]")
+    else:
+        scorecards.append(build_scorecard(ollama_runs, provider="ollama"))
+
+    table = Table(title="Provider comparison")
+    table.add_column("provider", no_wrap=True)
+    table.add_column("root-cause accuracy")
+    table.add_column("action accuracy")
+    table.add_column("total steps")
+    table.add_column("avg steps/scenario")
+    for scorecard in scorecards:
+        table.add_row(
+            scorecard.provider,
+            f"{scorecard.root_cause_accuracy:.0%}",
+            f"{scorecard.action_accuracy:.0%}",
+            str(scorecard.total_steps),
+            f"{scorecard.average_steps:.1f}",
+        )
+    console.print(table)
+
+    if report_path:
+        Path(report_path).write_text(render_comparison_markdown(scorecards), encoding="utf-8")
+        console.print(f"[dim]Comparison written to {report_path}[/dim]")
 
 
 if __name__ == "__main__":
