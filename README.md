@@ -13,7 +13,7 @@ This project is being built in public, one night at a time. See
 [`PROGRESS.md`](PROGRESS.md) for the full architecture, the phased build
 plan, and exactly where work left off.
 
-**Current phase:** Phases 1–5 are complete — domain models, an
+**Current phase: Phases 1–6 are complete** — domain models, an
 append-only audit trail, a pluggable LLM provider interface with a
 deterministic scripted policy, the investigate → hypothesize →
 diagnose loop, real Prometheus/kubectl/runbook/deploy-history clients
@@ -23,8 +23,11 @@ contradiction-triggered re-planning, an optional local-model provider
 approval gate (CLI prompt and Slack) in front of every state-changing
 action, action executors that only run once a human has said yes, an
 incident simulator that fires six fault-injected scenarios through the
-full investigate → approve → act loop unattended, and a CLI, all
-backed by a full test suite.
+full investigate → approve → act loop unattended, a scorecard that
+scores every scenario's diagnosis against ground truth (root-cause
+accuracy, action accuracy, steps taken) and compares providers, and a
+CLI, all backed by a full test suite. See [`DAILY_REPORT.md`](DAILY_REPORT.md)
+for a night-by-night summary, test results, and known limitations.
 
 ## Preview
 
@@ -95,6 +98,14 @@ All screenshots below are real terminal output from the commands shown
 
 ![Simulator run-all summary across all six scenarios](docs/screenshots/16-simulate-run-all.png)
 
+**`oncall-agent simulate scorecard`** — the Phase 6 scorecard: every scenario's diagnosis scored against its true cause, showing root-cause accuracy (50%, three scenarios the scripted policy can't tell apart from a generic dependency failure yet) alongside action accuracy (100% — it never takes a wrong destructive action even when the labeled cause is wrong):
+
+![Scorecard: root-cause and action accuracy across all six scenarios](docs/screenshots/17-simulate-scorecard.png)
+
+**`oncall-agent simulate compare`** — comparing the scripted policy against the optional Ollama provider; since no local Ollama server is running here, it reports that honestly and falls back to the scripted-only comparison instead of failing:
+
+![Provider comparison, gracefully falling back when Ollama is unreachable](docs/screenshots/18-simulate-compare.png)
+
 ## Why this exists
 
 Real incident response is a loop: look at evidence, form a theory, look
@@ -147,8 +158,9 @@ src/oncall_agent/
 │   └── runbooks.py       RunbookSearchTool — keyword search over runbooks/*.md
 ├── simulator/
 │   ├── faults.py          FaultType, FAULT_PROFILES, inject_fault — canned fault evidence
-│   ├── scenarios.py        Scenario, SCENARIOS — six incidents, one per runbook
-│   └── runner.py           run_scenario / run_all_scenarios — fires respond_to_incident unattended
+│   ├── scenarios.py        Scenario, SCENARIOS — six incidents, one per runbook, each with ground truth
+│   ├── runner.py           run_scenario / run_all_scenarios — fires respond_to_incident unattended
+│   └── scorecard.py        score_run / build_scorecard — root-cause/action accuracy, steps, per provider
 └── cli.py               click CLI: version, config, demo, audit, approve, simulate, tools
 ```
 
@@ -201,8 +213,30 @@ here needs a live cluster to inject a fault into — `FAULT_PROFILES` just
 describes, per fault, what a live cluster's tools would have reported if
 that fault were real.
 
-Full phase-by-phase plan (the scorecard, provider comparison) is in
-[`PROGRESS.md`](PROGRESS.md).
+`scorecard.py` is the Phase 6 layer on top of the simulator: each
+`Scenario` now carries an `expected_category`/`expected_action` ground
+truth (not necessarily what the scripted policy can currently produce —
+three of the six are true causes it has no dedicated signal for yet), and
+`Diagnosis` gained a `category` field the scripted policy tags on every
+branch of `_diagnose`, mirroring the category it tagged on the leading
+hypothesis. `score_run` compares one `ScenarioRun`'s actual
+category/action against that ground truth and counts the audit-trail
+steps (tool calls plus hypotheses formed/revised) and revisions;
+`build_scorecard` aggregates a whole suite into root-cause accuracy,
+action accuracy, and step counts. Nothing about this needed to touch
+`run_investigation`, `respond_to_incident`, or the scripted policy's
+control flow — purely additive fields and a read-only comparison layer,
+same pattern every prior phase used. Today's scorecard against the
+scripted policy: 50% root-cause accuracy (3/6 — the two precisely
+diagnosed scenarios plus dependency-outage, which the generic fallback
+happens to label correctly) but 100% action accuracy (it never proposes
+a wrong destructive action, even on the three it mislabels — it always
+falls back to `ESCALATE` rather than guessing). `simulate compare` runs
+the same suite against the optional `OllamaProvider` too, if a local
+Ollama server is reachable; otherwise it reports that honestly and
+compares against the scripted policy alone rather than failing outright.
+
+Full phase-by-phase plan is in [`PROGRESS.md`](PROGRESS.md).
 
 ## Installation
 
@@ -249,6 +283,14 @@ oncall-agent simulate list
 oncall-agent simulate run bad-deploy
 oncall-agent simulate run network-partition
 oncall-agent simulate run-all
+
+# score every scenario's diagnosis against ground truth
+oncall-agent simulate scorecard
+oncall-agent simulate scorecard --report scorecard.md
+
+# compare the scripted policy against the optional Ollama provider
+oncall-agent simulate compare
+oncall-agent simulate compare --report comparison.md
 
 # call a real read-only tool directly, outside an investigation
 oncall-agent tools query-prometheus 'up{job="checkout-service"}' --url http://localhost:9090
@@ -324,13 +366,23 @@ prints a one-line summary of each outcome. Every run appends to its
 own audit log (`.oncall-agent/simulator.jsonl` by default, overridable
 with `--audit-log`), inspectable afterwards with `oncall-agent audit`.
 
+`simulate scorecard` runs all six scenarios and scores each diagnosis
+against the scenario's ground truth, printing root-cause accuracy,
+action accuracy, and steps taken per scenario (`--provider ollama`
+scores the optional local-model provider instead; `--report PATH`
+writes the same scorecard as a standalone Markdown document).
+`simulate compare` runs the suite against both the scripted policy and
+`OllamaProvider` and prints them side by side — or, if no Ollama server
+is reachable at the configured URL, prints a warning and falls back to
+the scripted policy alone rather than failing.
+
 ## Testing
 
 ```bash
 pytest -q --cov=oncall_agent
 ```
 
-200 tests, 99% statement coverage, no network access or API key
+216 tests, 99% statement coverage, no network access or API key
 required — this is also what CI runs. The real Prometheus/kubectl
 clients, the optional Ollama provider, and the Slack approval gate are
 all tested by mocking the HTTP/subprocess boundary, so the suite never
