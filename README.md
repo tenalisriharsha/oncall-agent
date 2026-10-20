@@ -1,33 +1,13 @@
 # oncall-agent
 
+[![CI](https://github.com/tenalisriharsha/oncall-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/tenalisriharsha/oncall-agent/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An agentic SRE incident responder. Given an alert, it investigates like
 an on-call engineer would: form a hypothesis, call a read-only tool,
 revise the hypothesis from what came back, and keep going until it can
 state a root cause and a proposed fix — with every step written to an
 audit trail and every state-changing action blocked behind human
 approval.
-
-## Project Status
-
-This project is being built in public, one night at a time. See
-[`PROGRESS.md`](PROGRESS.md) for the full architecture, the phased build
-plan, and exactly where work left off.
-
-**Current phase: Phases 1–6 are complete** — domain models, an
-append-only audit trail, a pluggable LLM provider interface with a
-deterministic scripted policy, the investigate → hypothesize →
-diagnose loop, real Prometheus/kubectl/runbook/deploy-history clients
-alongside the original fakes, multi-hypothesis ranking with
-contradiction-triggered re-planning, an optional local-model provider
-(Ollama), structured diagnosis report export (Markdown/JSON), a human
-approval gate (CLI prompt and Slack) in front of every state-changing
-action, action executors that only run once a human has said yes, an
-incident simulator that fires six fault-injected scenarios through the
-full investigate → approve → act loop unattended, a scorecard that
-scores every scenario's diagnosis against ground truth (root-cause
-accuracy, action accuracy, steps taken) and compares providers, and a
-CLI, all backed by a full test suite. See [`DAILY_REPORT.md`](DAILY_REPORT.md)
-for a night-by-night summary, test results, and known limitations.
 
 ## Preview
 
@@ -387,6 +367,10 @@ required — this is also what CI runs. The real Prometheus/kubectl
 clients, the optional Ollama provider, and the Slack approval gate are
 all tested by mocking the HTTP/subprocess boundary, so the suite never
 needs a live cluster, metrics backend, local model, or Slack workspace.
+
+## Status
+
+Complete at version 0.1. The phase-by-phase build history is in [PROGRESS.md](PROGRESS.md) and known limitations and ideas for next steps are in [DAILY_REPORT.md](DAILY_REPORT.md).
 
 ## License
 
