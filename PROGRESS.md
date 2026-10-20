@@ -312,3 +312,25 @@ rough order of value, are:
    stay skipped by default.
 
 STATUS: COMPLETE
+
+## Build history (moved from README)
+
+This project is being built in public, one night at a time. See
+[`PROGRESS.md`](PROGRESS.md) for the full architecture, the phased build
+plan, and exactly where work left off.
+
+**Current phase: Phases 1–6 are complete** — domain models, an
+append-only audit trail, a pluggable LLM provider interface with a
+deterministic scripted policy, the investigate → hypothesize →
+diagnose loop, real Prometheus/kubectl/runbook/deploy-history clients
+alongside the original fakes, multi-hypothesis ranking with
+contradiction-triggered re-planning, an optional local-model provider
+(Ollama), structured diagnosis report export (Markdown/JSON), a human
+approval gate (CLI prompt and Slack) in front of every state-changing
+action, action executors that only run once a human has said yes, an
+incident simulator that fires six fault-injected scenarios through the
+full investigate → approve → act loop unattended, a scorecard that
+scores every scenario's diagnosis against ground truth (root-cause
+accuracy, action accuracy, steps taken) and compares providers, and a
+CLI, all backed by a full test suite. See [`DAILY_REPORT.md`](DAILY_REPORT.md)
+for a night-by-night summary, test results, and known limitations.
