@@ -157,3 +157,35 @@ def test_custom_model_and_url_are_used_in_request(monkeypatch):
 
     assert captured["url"] == "http://example.com:11434/api/generate"
     assert captured["json"]["model"] == "mixtral"
+
+def test_decide_raises_on_unknown_tool_name(monkeypatch):
+    decision = {
+        "action": "call_tool",
+        "rationale": "fetch weather",
+        "tool_name": "get_weather",
+        "tool_arguments": {"service": "checkout-service"},
+    }
+    monkeypatch.setattr(
+        requests, "post", lambda *a, **k: FakeResponse(200, {"response": json.dumps(decision)})
+    )
+
+    alert = Alert(title="High error rate", description="5xx spike", service="checkout-service")
+    request = LLMRequest(alert=alert, available_tools=["get_pod_status", "get_recent_deploys"])
+
+    with pytest.raises(OllamaProviderError, match="unknown tool 'get_weather'") as exc_info:
+        OllamaProvider().decide(request)
+    assert "get_pod_status, get_recent_deploys" in str(exc_info.value)
+
+
+def test_decide_raises_on_call_tool_without_tool_name(monkeypatch):
+    decision = {
+        "action": "call_tool",
+        "rationale": "missing tool name",
+    }
+    monkeypatch.setattr(
+        requests, "post", lambda *a, **k: FakeResponse(200, {"response": json.dumps(decision)})
+    )
+
+    with pytest.raises(OllamaProviderError, match="without specifying a tool_name"):
+        OllamaProvider().decide(make_request())
+

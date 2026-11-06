@@ -139,3 +139,19 @@ def test_simulate_compare_includes_ollama_when_reachable(monkeypatch):
     assert "scripted" in result.output.lower()
     assert "ollama" in result.output.lower()
     assert "unavailable" not in result.output.lower()
+
+def test_simulate_scorecard_with_ollama_provider_unknown_tool_exits_nonzero(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")
+    decision = json.dumps({
+        "action": "call_tool",
+        "tool_name": "get_weather",
+        "tool_arguments": {},
+    })
+    monkeypatch.setattr(
+        requests, "post", lambda *a, **k: _FakeOllamaResponse({"response": decision})
+    )
+    result = CliRunner().invoke(main, ["simulate", "scorecard", "--provider", "ollama"])
+    assert result.exit_code != 0
+    assert "unknown tool 'get_weather'" in result.output.lower()
+    assert "traceback" not in result.output.lower()
+

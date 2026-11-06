@@ -200,6 +200,38 @@ def test_demo_with_ollama_provider(tmp_path, monkeypatch):
     assert "bad deploy" in result.output.lower()
 
 
+def test_demo_with_ollama_provider_unknown_tool_prints_clean_error(tmp_path, monkeypatch):
+    log_path = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("ONCALL_AGENT_LLM_PROVIDER", "ollama")
+
+    decision = {
+        "action": "call_tool",
+        "rationale": "fetch current weather",
+        "tool_name": "get_weather",
+        "tool_arguments": {"service": "checkout-service"},
+    }
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.status_code = 200
+            self._payload = payload
+            self.text = ""
+
+        def json(self):
+            return {"response": json.dumps(self._payload)}
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResponse(decision))
+
+    result = CliRunner().invoke(
+        main, ["demo", "--scenario", "deploy-regression", "--audit-log", str(log_path)]
+    )
+
+    assert result.exit_code == 1
+    assert "unknown tool 'get_weather'" in result.output.lower()
+    assert "traceback" not in result.output.lower()
+    assert "keyerror" not in result.output.lower()
+
+
 def test_demo_with_report_format_json(tmp_path):
     log_path = tmp_path / "audit.jsonl"
     report_path = tmp_path / "report.json"

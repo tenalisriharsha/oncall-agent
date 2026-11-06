@@ -63,7 +63,7 @@ class OllamaProvider(LLMProvider):
 
     def decide(self, request: LLMRequest) -> LLMResponse:
         raw = self._generate(self._build_prompt(request))
-        return self._parse_response(raw)
+        return self._parse_response(raw, available_tools=request.available_tools)
 
     def _build_prompt(self, request: LLMRequest) -> str:
         return (
@@ -101,7 +101,7 @@ class OllamaProvider(LLMProvider):
 
         return payload.get("response", "")
 
-    def _parse_response(self, raw: str) -> LLMResponse:
+    def _parse_response(self, raw: str, available_tools: list[str] | None = None) -> LLMResponse:
         try:
             data: dict[str, Any] = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -111,6 +111,18 @@ class OllamaProvider(LLMProvider):
             action = LLMAction(data["action"])
         except (KeyError, ValueError) as exc:
             raise OllamaProviderError(f"Model returned an unknown action: {data!r}") from exc
+
+        if action == LLMAction.CALL_TOOL:
+            tool_name = data.get("tool_name")
+            if not tool_name:
+                raise OllamaProviderError(
+                    f"Model requested call_tool action without specifying a tool_name: {data!r}"
+                )
+            if available_tools and tool_name not in available_tools:
+                known = ", ".join(sorted(available_tools))
+                raise OllamaProviderError(
+                    f"Model selected an unknown tool '{tool_name}'. Available tools: {known}"
+                )
 
         try:
             hypothesis = Hypothesis(**data["hypothesis"]) if data.get("hypothesis") else None

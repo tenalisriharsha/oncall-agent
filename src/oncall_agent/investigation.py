@@ -53,7 +53,10 @@ def run_investigation(
         response = provider.decide(request)
 
         if response.action == LLMAction.CALL_TOOL:
-            tool = tools.get(response.tool_name)
+            try:
+                tool = tools.get(response.tool_name)
+            except KeyError as exc:
+                raise InvestigationError(str(exc)) from exc
             result = tool.run(**response.tool_arguments)
             record = ToolCallRecord(
                 tool=tool.name,

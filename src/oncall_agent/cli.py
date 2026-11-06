@@ -20,7 +20,7 @@ from .actions import ActionRegistry
 from .approval import AutoApprovalGate, CLIApprovalGate, SlackDecisionInbox
 from .audit import AuditTrail
 from .config import Settings
-from .investigation import run_investigation
+from .investigation import InvestigationError, run_investigation
 from .llm import get_provider
 from .llm.ollama import OllamaProviderError
 from .models import Alert, ApprovalDecision, ApprovalStatus, Severity
@@ -201,20 +201,24 @@ def demo(
         )
     )
 
-    if approval_gate_name == "skip":
-        diagnosis = run_investigation(alert, provider, tools, audit)
-        approval = None
-        action_result = None
-    else:
-        approval_gate = (
-            CLIApprovalGate() if approval_gate_name == "cli" else AutoApprovalGate()
-        )
-        response = respond_to_incident(
-            alert, provider, tools, audit, approval_gate, action_registry=ActionRegistry.noop()
-        )
-        diagnosis = response.diagnosis
-        approval = response.approval
-        action_result = response.action_result
+    try:
+        if approval_gate_name == "skip":
+            diagnosis = run_investigation(alert, provider, tools, audit)
+            approval = None
+            action_result = None
+        else:
+            approval_gate = (
+                CLIApprovalGate() if approval_gate_name == "cli" else AutoApprovalGate()
+            )
+            response = respond_to_incident(
+                alert, provider, tools, audit, approval_gate, action_registry=ActionRegistry.noop()
+            )
+            diagnosis = response.diagnosis
+            approval = response.approval
+            action_result = response.action_result
+    except (OllamaProviderError, InvestigationError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise SystemExit(1)
 
     _print_diagnosis(diagnosis, approval, action_result)
     console.print(f"[dim]Audit trail written to {log_path}[/dim]")
@@ -469,7 +473,11 @@ def simulate_run(scenario_name: str, audit_log_path: str | None) -> None:
         console.print(f"[red]{exc}[/red]")
         raise SystemExit(1)
 
-    run = run_scenario(scenario, audit_log_path=audit_log_path)
+    try:
+        run = run_scenario(scenario, audit_log_path=audit_log_path)
+    except (OllamaProviderError, InvestigationError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise SystemExit(1)
     console.print(
         Panel(
             f"[bold]{run.alert.title}[/bold]\n{run.alert.description}\n"
@@ -497,7 +505,11 @@ def simulate_run_all(audit_log_path: str | None) -> None:
     table.add_column("confidence", no_wrap=True)
     table.add_column("root cause", no_wrap=True)
     for scenario in SIM_SCENARIOS:
-        run: ScenarioRun = run_scenario(scenario, audit_log_path=audit_log_path)
+        try:
+            run: ScenarioRun = run_scenario(scenario, audit_log_path=audit_log_path)
+        except (OllamaProviderError, InvestigationError) as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise SystemExit(1)
         diagnosis = run.response.diagnosis
         table.add_row(
             scenario.name,
@@ -548,7 +560,7 @@ def simulate_scorecard(provider_name: str, report_path: str | None, audit_log_pa
     )
     try:
         runs = run_all_scenarios(provider=provider, audit_log_path=audit_log_path)
-    except OllamaProviderError as exc:
+    except (OllamaProviderError, InvestigationError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise SystemExit(1)
 
