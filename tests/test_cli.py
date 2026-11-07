@@ -200,6 +200,48 @@ def test_demo_with_ollama_provider(tmp_path, monkeypatch):
     assert "bad deploy" in result.output.lower()
 
 
+def test_demo_with_ollama_unknown_tool_name_fails_cleanly(tmp_path, monkeypatch):
+    """An unrecognized tool_name from the model must not crash with a raw traceback.
+
+    Regression for issue #7: the model naming a tool that was never
+    registered (a plausible hallucination) must be reported the same
+    clean, non-zero-exit way as every other upstream-model failure
+    (unreachable Ollama, non-JSON output, unknown action), not leak a
+    bare KeyError out of the CLI.
+    """
+    log_path = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("ONCALL_AGENT_LLM_PROVIDER", "ollama")
+
+    payload = {
+        "action": "call_tool",
+        "rationale": "checking an unregistered tool",
+        "tool_name": "get_weather",
+        "tool_arguments": {"service": "checkout-service"},
+    }
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.status_code = 200
+            self._payload = payload
+            self.text = ""
+
+        def json(self):
+            return {"response": json.dumps(self._payload)}
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResponse(payload))
+
+    result = CliRunner().invoke(
+        main, ["demo", "--scenario", "deploy-regression", "--audit-log", str(log_path)]
+    )
+
+    assert result.exit_code != 0
+    assert not isinstance(result.exception, KeyError), (
+        "an unrecognized tool_name must be turned into a clean, handled error "
+        "(like OllamaProviderError/InvestigationError) instead of a raw KeyError "
+        "propagating out of the CLI"
+    )
+
+
 def test_demo_with_report_format_json(tmp_path):
     log_path = tmp_path / "audit.jsonl"
     report_path = tmp_path / "report.json"
