@@ -122,6 +122,7 @@ def test_diagnoses_unknown_cause_when_no_signal_found():
     assert response.action == LLMAction.DIAGNOSE
     assert response.diagnosis.confidence < 0.5
     assert response.diagnosis.action == ActionType.ESCALATE
+    assert response.diagnosis.requires_approval is False
 
 
 def test_is_deterministic_for_same_input():
@@ -237,6 +238,7 @@ def test_diagnosis_after_revision_escalates_to_dependency_failure():
     assert "dependency" in response.diagnosis.proposed_fix.lower()
     assert response.diagnosis.hypotheses_considered == [hypotheses[1], hypotheses[0]]
     assert response.diagnosis.action == ActionType.ESCALATE
+    assert response.diagnosis.requires_approval is False
 
 
 def test_diagnosis_always_attaches_ranked_hypotheses_considered():

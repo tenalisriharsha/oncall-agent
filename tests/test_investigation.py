@@ -66,6 +66,7 @@ def test_old_deploy_with_no_pod_signal_replans_before_diagnosing(tmp_path: Path)
 
     assert "dependency" in diagnosis.root_cause.lower()
     assert len(diagnosis.hypotheses_considered) == 2
+    assert diagnosis.requires_approval is False
 
     events = audit.for_incident(alert.id)
     event_types = [e.event_type for e in events]
