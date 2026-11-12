@@ -139,3 +139,56 @@ def test_simulate_compare_includes_ollama_when_reachable(monkeypatch):
     assert "scripted" in result.output.lower()
     assert "ollama" in result.output.lower()
     assert "unavailable" not in result.output.lower()
+
+
+_UNKNOWN_TOOL_DECISION = json.dumps(
+    {
+        "action": "call_tool",
+        "rationale": "checking an unregistered tool",
+        "tool_name": "get_weather",
+        "tool_arguments": {"service": "checkout-service"},
+    }
+)
+
+
+def test_simulate_scorecard_with_ollama_unknown_tool_name_fails_cleanly(monkeypatch):
+    """An unrecognized tool_name from the model must not crash with a raw traceback.
+
+    Regression for issue #12: `simulate scorecard --provider ollama` only caught
+    OllamaProviderError around run_all_scenarios, so a model naming an unregistered
+    tool raised InvestigationError (wrapping a KeyError from ToolRegistry.get) and
+    the CLI printed a raw traceback instead of a clean, handled error like `demo`
+    already does for this exact failure.
+    """
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(
+        requests, "post", lambda *a, **k: _FakeOllamaResponse({"response": _UNKNOWN_TOOL_DECISION})
+    )
+    result = CliRunner().invoke(main, ["simulate", "scorecard", "--provider", "ollama"])
+    assert result.exit_code != 0
+    assert "unknown tool" in result.output.lower(), (
+        "the CLI must print a clean error message for an unrecognized tool_name "
+        "(like `demo` already does) instead of letting InvestigationError propagate "
+        "uncaught as a raw traceback"
+    )
+
+
+def test_simulate_compare_with_ollama_unknown_tool_name_fails_cleanly(monkeypatch):
+    """`simulate compare` must not crash with a raw traceback either.
+
+    Regression for issue #12: the try/except around the Ollama run in
+    `simulate compare` only caught OllamaProviderError, not InvestigationError,
+    so an unrecognized tool_name from a reachable Ollama model crashed the
+    command instead of being reported cleanly (as `demo` already does).
+    """
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(
+        requests, "post", lambda *a, **k: _FakeOllamaResponse({"response": _UNKNOWN_TOOL_DECISION})
+    )
+    result = CliRunner().invoke(main, ["simulate", "compare"])
+    assert result.exit_code != 0
+    assert "unknown tool" in result.output.lower(), (
+        "the CLI must print a clean error message for an unrecognized tool_name "
+        "(like `demo` already does) instead of letting InvestigationError propagate "
+        "uncaught as a raw traceback"
+    )

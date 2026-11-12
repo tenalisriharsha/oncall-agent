@@ -552,7 +552,7 @@ def simulate_scorecard(provider_name: str, report_path: str | None, audit_log_pa
     )
     try:
         runs = run_all_scenarios(provider=provider, audit_log_path=audit_log_path)
-    except OllamaProviderError as exc:
+    except (OllamaProviderError, InvestigationError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise SystemExit(1)
 
@@ -623,6 +623,9 @@ def simulate_compare(report_path: str | None, audit_log_path: str | None) -> Non
         ollama_runs = run_all_scenarios(provider=ollama_provider, audit_log_path=audit_log_path)
     except OllamaProviderError as exc:
         console.print(f"[yellow]Ollama provider unavailable, comparing against scripted only: {exc}[/yellow]")
+    except InvestigationError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise SystemExit(1)
     else:
         scorecards.append(build_scorecard(ollama_runs, provider="ollama"))
 
