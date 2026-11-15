@@ -4,8 +4,8 @@ import pytest
 import requests
 
 from oncall_agent.llm.base import LLMAction, LLMRequest
-from oncall_agent.llm.ollama import OllamaProvider, OllamaProviderError
-from oncall_agent.models import Alert
+from oncall_agent.llm.ollama import SYSTEM_PROMPT, OllamaProvider, OllamaProviderError
+from oncall_agent.models import ActionType, Alert
 
 
 class FakeResponse:
@@ -77,6 +77,46 @@ def test_decide_parses_diagnose_action(monkeypatch):
 
     assert response.action == LLMAction.DIAGNOSE
     assert response.diagnosis.root_cause == "bad deploy"
+
+
+def test_system_prompt_diagnose_shape_requests_action_fields():
+    """Without these in the shape, the model never supplies them, so
+    `Diagnosis.action` stays `None` for every Ollama diagnosis and
+    `respond_to_incident()`/scorecard can never see an action (issue #6).
+    """
+    diagnose_shape = SYSTEM_PROMPT.split('"diagnose"', 1)[1]
+
+    assert '"category"' in diagnose_shape
+    assert '"action"' in diagnose_shape
+    assert '"action_arguments"' in diagnose_shape
+
+
+def test_decide_parses_diagnose_action_and_category(monkeypatch):
+    decision = {
+        "action": "diagnose",
+        "diagnosis": {
+            "root_cause": "bad deploy",
+            "confidence": 0.9,
+            "evidence": ["deploy 10m ago"],
+            "proposed_fix": "roll back checkout-service to v1.2.3",
+            "requires_approval": True,
+            "category": "deploy_regression",
+            "action": "rollback",
+            "action_arguments": {"service": "checkout-service", "version": "v1.2.3"},
+        },
+    }
+    monkeypatch.setattr(
+        requests, "post", lambda *a, **k: FakeResponse(200, {"response": json.dumps(decision)})
+    )
+
+    response = OllamaProvider().decide(make_request())
+
+    assert response.diagnosis.action == ActionType.ROLLBACK
+    assert response.diagnosis.category == "deploy_regression"
+    assert response.diagnosis.action_arguments == {
+        "service": "checkout-service",
+        "version": "v1.2.3",
+    }
 
 
 def test_decide_raises_on_network_error(monkeypatch):
