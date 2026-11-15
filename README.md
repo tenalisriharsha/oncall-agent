@@ -220,14 +220,18 @@ Full phase-by-phase plan is in [`PROGRESS.md`](PROGRESS.md).
 
 ## Installation
 
+Requires Python 3.10+. Check your default interpreter first — `python3
+--version` — and if it's older, point the venv at a newer interpreter
+instead (e.g. `python3.11 -m venv .venv`):
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-Requires Python 3.10+. No API key needed — the default LLM provider is
-fully local and deterministic.
+No API key needed — the default LLM provider is fully local and
+deterministic.
 
 ## Usage
 
