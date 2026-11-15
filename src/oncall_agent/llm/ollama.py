@@ -38,7 +38,17 @@ three shapes:
 3. Conclude with a diagnosis:
    {"action": "diagnose", "rationale": "...",
     "diagnosis": {"root_cause": "...", "confidence": 0.0-1.0, "evidence": ["..."],
-                   "proposed_fix": "...", "requires_approval": true}}
+                   "proposed_fix": "...", "requires_approval": true,
+                   "category": "...",
+                   "action": "restart" | "rollback" | "scale" | "escalate" | null,
+                   "action_arguments": {...}}}
+
+For the diagnosis shape: "category" is a short free-form label for the
+root cause (e.g. "deploy_regression"). "action" is the automated fix that
+"proposed_fix" maps to, chosen from restart/rollback/scale/escalate, or
+null if no automated fix applies. "action_arguments" holds whatever
+parameters that action needs (e.g. {"service": "...", "to_version": "..."}),
+or {} when "action" is null.
 """
 
 
