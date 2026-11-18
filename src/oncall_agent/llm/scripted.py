@@ -165,7 +165,7 @@ class ScriptedPolicyProvider(LLMProvider):
                     f"Escalate {request.alert.service} and check downstream "
                     "dependency health and latency."
                 ),
-                requires_approval=True,
+                requires_approval=False,
                 category=CATEGORY_DEPENDENCY_FAILURE,
                 hypotheses_considered=ranked,
                 action=ActionType.ESCALATE,
@@ -219,7 +219,7 @@ class ScriptedPolicyProvider(LLMProvider):
             confidence=0.35,
             evidence=["No recent deploy.", "No OOM signal in pod status."],
             proposed_fix=f"Escalate {request.alert.service} to a human on-call engineer.",
-            requires_approval=True,
+            requires_approval=False,
             category=CATEGORY_DEPENDENCY_FAILURE,
             hypotheses_considered=ranked,
             action=ActionType.ESCALATE,
