@@ -165,6 +165,25 @@ def test_decide_raises_on_unknown_action(monkeypatch):
         OllamaProvider().decide(make_request())
 
 
+def test_decide_raises_on_non_dict_tool_arguments(monkeypatch):
+    """A model can return `tool_arguments` as a list instead of an object
+    (observed from a real local model). That must surface as a clean
+    OllamaProviderError, not an uncaught pydantic ValidationError when
+    building LLMResponse (issue #17).
+    """
+    decision = {
+        "action": "call_tool",
+        "tool_name": "get_pod_status",
+        "tool_arguments": ["get_pod_status", "checkout-service"],
+    }
+    monkeypatch.setattr(
+        requests, "post", lambda *a, **k: FakeResponse(200, {"response": json.dumps(decision)})
+    )
+
+    with pytest.raises(OllamaProviderError):
+        OllamaProvider().decide(make_request())
+
+
 def test_decide_raises_on_malformed_hypothesis(monkeypatch):
     decision = {"action": "form_hypothesis", "hypothesis": {"confidence": 5.0}}
     monkeypatch.setattr(
