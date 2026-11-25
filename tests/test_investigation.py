@@ -102,3 +102,24 @@ def test_raises_investigation_error_when_it_does_not_converge(tmp_path: Path):
 
     with pytest.raises(InvestigationError):
         run_investigation(alert, _StuckProvider(), make_registry(), audit, max_steps=3)
+
+
+class _MissingToolArgsProvider(LLMProvider):
+    """Names a real tool but omits the arguments it requires (issue #17)."""
+
+    name = "missing-tool-args"
+
+    def decide(self, request: LLMRequest) -> LLMResponse:
+        return LLMResponse(action=LLMAction.CALL_TOOL, tool_name="get_pod_status", tool_arguments={})
+
+
+def test_tool_call_with_missing_required_arguments_raises_investigation_error(tmp_path: Path):
+    """A valid tool name with arguments missing required keys must fail
+    cleanly as an InvestigationError, not crash the CLI with a raw
+    TypeError from `tool.run(**response.tool_arguments)` (issue #17).
+    """
+    alert = Alert(title="t", description="d", service="checkout-service")
+    audit = AuditTrail(tmp_path / "audit.jsonl")
+
+    with pytest.raises(InvestigationError):
+        run_investigation(alert, _MissingToolArgsProvider(), make_registry(), audit)

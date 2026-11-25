@@ -57,7 +57,13 @@ def run_investigation(
                 tool = tools.get(response.tool_name)
             except KeyError as exc:
                 raise InvestigationError(str(exc)) from exc
-            result = tool.run(**response.tool_arguments)
+            try:
+                result = tool.run(**response.tool_arguments)
+            except TypeError as exc:
+                raise InvestigationError(
+                    f"Tool {tool.name!r} called with invalid arguments "
+                    f"{response.tool_arguments!r}: {exc}"
+                ) from exc
             record = ToolCallRecord(
                 tool=tool.name,
                 arguments=response.tool_arguments,
