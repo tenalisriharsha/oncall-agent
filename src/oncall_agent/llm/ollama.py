@@ -128,11 +128,15 @@ class OllamaProvider(LLMProvider):
         except (TypeError, ValidationError) as exc:
             raise OllamaProviderError(f"Model returned a malformed hypothesis/diagnosis: {data!r}") from exc
 
+        tool_arguments = data.get("tool_arguments") or {}
+        if not isinstance(tool_arguments, dict):
+            raise OllamaProviderError(f"Model returned non-dict tool_arguments: {data!r}")
+
         return LLMResponse(
             action=action,
             rationale=data.get("rationale", ""),
             tool_name=data.get("tool_name"),
-            tool_arguments=data.get("tool_arguments") or {},
+            tool_arguments=tool_arguments,
             hypothesis=hypothesis,
             diagnosis=diagnosis,
         )
